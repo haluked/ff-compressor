@@ -195,6 +195,23 @@ Real 4K HDR10 HEVC was re-encoded to a 10-bit HEVC output with BT.2020/PQ tags
 intact; real 1080p HDR10 was also written to MP4 with `hvc1`. The current app
 build is **353 KB**, and the core suite passes **493 tests**.
 
+## M6 release validation
+
+- Version metadata is **1.0.0** in the executable, manifest and window.
+- `tools\make-release.ps1` builds `dist\ff-compressor-1.0.0-win64\` from a
+  clean commit, including the app, pinned FFmpeg, licences, notices, checksums
+  and `source.zip`.
+- All release checksums verify against `SHA256SUMS.txt`.
+- The packaged EXE was run from the release folder and completed full
+  compressions using its own `bin\ffmpeg.exe` and `bin\ffprobe.exe`:
+  a synthetic AAC clip and a real 1080p 60 fps HEVC10 clip. Both outputs were
+  probed and verified.
+- The real 4K HDR10 clip was also re-encoded to 10-bit HEVC with BT.2020/PQ
+  metadata intact.
+- Phone-specific scenarios (real 4K HEVC HDR10/HLG/Dolby Vision, portrait
+  rotation, high-fps and multi-audio phone clips) remain pending until real
+  phone footage is supplied in `tests/media/phone/`.
+
 ## Design
 
 The interface follows the same Game Boy DMG language as `ff-dlp-viewer`: four

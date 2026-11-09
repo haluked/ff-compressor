@@ -50,3 +50,9 @@ The test screens are transient; the cards are the normal quality-step state.
   speed, time estimate and `CANCEL`.
 - `m5-done.png` — completed and verified output with the destination folder,
   file name, size and `OPEN FOLDER`.
+
+## M6 — packaged release
+
+- `m6-release-real-done.png` — the packaged v1.0.0 EXE compressing a real
+  1080p 60 fps HEVC10 clip from the release folder using its own `bin\ffmpeg`
+  and `bin\ffprobe`, with the verified result shown.
