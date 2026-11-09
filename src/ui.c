@@ -38,6 +38,7 @@
 #define IDC_BTN_TESTAGAIN 3010
 #define IDC_BTN_QCANCEL  3011
 #define IDC_BTN_COMPRESS 3012
+#define IDC_BTN_PREVIEW  3013
 
 #define BASE_CLIENT_W 646
 #define BASE_CLIENT_H 485
@@ -65,6 +66,7 @@ static HWND g_hBtnBack = NULL;
 static HWND g_hBtnTestAgain = NULL;
 static HWND g_hBtnQCancel = NULL;
 static HWND g_hBtnCompress = NULL;
+static HWND g_hBtnPreview = NULL;
 
 static HFONT g_fontTitle = NULL;
 static HFONT g_fontBold = NULL;
@@ -117,6 +119,11 @@ static ULONGLONG g_est_start_tick = 0;
 static volatile int g_est_cancel = 0;
 static RECT g_rc_cards[ESTIMATE_MAX_LEVELS];
 static int g_card_count = 0;
+static int g_quality_preview = 0;
+static HBITMAP g_preview_orig_bmp = NULL;
+static HBITMAP g_preview_enc_bmp = NULL;
+static RECT g_rc_preview_chips[ESTIMATE_MAX_LEVELS];
+static int g_preview_chip_count = 0;
 
 typedef struct {
     ProbeError error;
@@ -151,6 +158,12 @@ static void quality_ui_update_selection(void);
 static void quality_ui_reset(void);
 static int quality_current_profile(void);
 static EstimateLevel *quality_level_result(int level);
+static int quality_level_index(int level);
+static void quality_ui_open_preview(HWND hWnd);
+static void quality_clear_preview_bitmaps(void);
+static void quality_cleanup_previews(void);
+static void quality_load_preview(void);
+static const wchar_t *quality_ssim_label(double ssim);
 
 static int S(int value)
 {
@@ -414,6 +427,19 @@ static void format_color_value(const SourceInfo *s, wchar_t *out, size_t cap)
                    m ? m : text(STR_VALUE_UNKNOWN));
     }
     out[cap - 1] = L'\0';
+}
+
+static int quality_has_savings(void)
+{
+    int i;
+    if (!g_quality_has_result || g_info.file_size <= 0) return 0;
+    for (i = 0; i < g_est.level_count; i++) {
+        EstimateLevel *e = &g_est.levels[i];
+        if (e->available && e->est_size_bytes < (double)g_info.file_size * 0.80) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int is_efficient(const SourceInfo *s)
@@ -996,9 +1022,11 @@ static void draw_quality(HDC hdc)
                     DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
         }
 
-        if (level == QUALITY_BALANCED) {
+        if (e && e->ssim_available) {
             RECT rr = { r.left + S(8), r.bottom - S(24), r.right - S(8), r.bottom - S(8) };
-            gb_text(hdc, g_fontSmallBold, ink, &rr, text(STR_QUALITY_RECOMMENDED),
+            _snwprintf(buf, 512, text(STR_QUALITY_SSIM_FMT), e->ssim);
+            buf[511] = L'\0';
+            gb_text(hdc, g_fontSmallBold, ink, &rr, buf,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
     }
@@ -1049,7 +1077,7 @@ static void draw_quality(HDC hdc)
         if (g_est.used_fallback) {
             gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, text(STR_QUALITY_FALLBACK),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-        } else if (is_efficient(&g_info)) {
+        } else if (!quality_has_savings()) {
             gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, text(STR_QUALITY_EFFICIENT),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
@@ -1071,10 +1099,10 @@ static void draw_quality_progress(HDC hdc)
     if (g_quality_last_seconds > 0.0) {
         _snwprintf(buf, 512, text(STR_QUALITY_ABOUT_LAST_FMT), g_est_seconds);
     } else {
-        int low = (int)((double)g_est_seconds * 0.8);
-        int high = (int)((double)g_est_seconds * 2.0);
+        int low = (int)((double)g_est_seconds * 0.7);
+        int high = (int)((double)g_est_seconds * 2.5);
         if (low < 3) low = 3;
-        if (high < low + 3) high = low + 3;
+        if (high < low + 5) high = low + 5;
         _snwprintf(buf, 512, text(STR_QUALITY_ABOUT_RANGE_FMT), low, high);
     }
     buf[511] = L'\0';
@@ -1113,6 +1141,140 @@ static void draw_quality_progress(HDC hdc)
             DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
+static void draw_bitmap_fit(HDC hdc, HBITMAP bmp, const RECT *box)
+{
+    BITMAP bm;
+    HDC mem;
+    HGDIOBJ old;
+    int bw, bh;
+    double scale;
+    int w, h, x, y;
+
+    if (!bmp || !GetObjectW(bmp, sizeof(bm), &bm) || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
+        RECT tr = *box;
+        gb_text(hdc, g_fontSmall, GB_LIGHTEST, &tr, text(STR_QUALITY_PREVIEW_UNAVAILABLE),
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        return;
+    }
+
+    bw = box->right - box->left;
+    bh = box->bottom - box->top;
+    scale = (double)bw / (double)bm.bmWidth;
+    if ((double)bh / (double)bm.bmHeight < scale) scale = (double)bh / (double)bm.bmHeight;
+    w = (int)((double)bm.bmWidth * scale);
+    h = (int)((double)bm.bmHeight * scale);
+    x = box->left + (bw - w) / 2;
+    y = box->top + (bh - h) / 2;
+
+    mem = CreateCompatibleDC(hdc);
+    if (!mem) return;
+    old = SelectObject(mem, bmp);
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, NULL);
+    StretchBlt(hdc, x, y, w, h, mem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteDC(mem);
+}
+
+static void draw_quality_preview(HDC hdc)
+{
+    wchar_t buf[256];
+    RECT r;
+    RECT rr;
+    int levels[ESTIMATE_MAX_LEVELS];
+    int count = g_est.level_count;
+    int i;
+    int x = S(32), y = S(110), gap = S(8);
+    int chip_w;
+    EstimateLevel *sel = quality_level_result(g_quality_selected);
+
+    if (count <= 0) return;
+    for (i = 0; i < count; i++) levels[i] = g_est.levels_used[i];
+    chip_w = (S(582) - gap * (count - 1)) / count;
+    g_preview_chip_count = count;
+
+    /* Level chips with SSIM. */
+    for (i = 0; i < count; i++) {
+        EstimateLevel *e = &g_est.levels[i];
+        int selected = (levels[i] == g_quality_selected);
+        COLORREF ink = selected ? GB_LIGHTEST : GB_DARKEST;
+        r.left = x + i * (chip_w + gap);
+        r.top = y;
+        r.right = r.left + chip_w;
+        r.bottom = y + S(24);
+        g_rc_preview_chips[i] = r;
+
+        if (e->ssim_available) {
+            wchar_t ssim_buf[32];
+            _snwprintf(ssim_buf, 32, L"%.3f", e->ssim);
+            ssim_buf[31] = L'\0';
+            _snwprintf(buf, 256, L"%ls %ls", presets_level_name(levels[i]), ssim_buf);
+        } else {
+            _snwprintf(buf, 256, L"%ls %ls", presets_level_name(levels[i]),
+                       text(STR_QUALITY_SSIM_NA));
+        }
+        buf[255] = L'\0';
+
+        gb_fill_round(hdc, &r, selected ? GB_DARKEST : GB_LIGHTEST, GB_LIGHTEST);
+        gb_frame_round(hdc, &r, GB_DARKEST, S(2), GB_LIGHTEST,
+                       selected ? GB_DARKEST : GB_LIGHTEST, 0);
+        gb_text(hdc, g_fontSmallBold, ink, &r, buf,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    /* Two frame boxes. */
+    r.left = S(32); r.top = S(142); r.right = S(312); r.bottom = S(302);
+    rr.left = S(334); rr.top = S(142); rr.right = S(614); rr.bottom = S(302);
+
+    gb_fill_round(hdc, &r, GB_DARKEST, GB_LIGHTEST);
+    gb_frame_round(hdc, &r, GB_DARKEST, S(2), GB_LIGHTEST, GB_DARKEST, 0);
+    gb_fill_round(hdc, &rr, GB_DARKEST, GB_LIGHTEST);
+    gb_frame_round(hdc, &rr, GB_DARKEST, S(2), GB_LIGHTEST, GB_DARKEST, 0);
+
+    {
+        RECT lab = r;
+        RECT img = r;
+        lab.bottom = lab.top + S(18);
+        img.top = lab.bottom;
+        InflateRect(&img, -S(2), -S(2));
+        gb_text(hdc, g_fontSmallBold, GB_LIGHTEST, &lab, text(STR_QUALITY_ORIGINAL),
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        draw_bitmap_fit(hdc, g_preview_orig_bmp, &img);
+    }
+    {
+        RECT lab = rr;
+        RECT img = rr;
+        lab.bottom = lab.top + S(18);
+        img.top = lab.bottom;
+        InflateRect(&img, -S(2), -S(2));
+        gb_text(hdc, g_fontSmallBold, GB_LIGHTEST, &lab, text(STR_QUALITY_COMPRESSED),
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        draw_bitmap_fit(hdc, g_preview_enc_bmp, &img);
+    }
+
+    /* SSIM result and note. */
+    if (sel && sel->available && sel->ssim_available) {
+        _snwprintf(buf, 256, text(STR_QUALITY_SSIM_LABEL_FMT), sel->ssim,
+                   quality_ssim_label(sel->ssim));
+    } else {
+        wcsncpy(buf, text(STR_QUALITY_SSIM_NA), 255);
+    }
+    buf[255] = L'\0';
+    SetRect(&r, S(32), S(308), S(614), S(326));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(328), S(614), S(344));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_QUALITY_PREVIEW_NOTE),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(344), S(614), S(360));
+    if (g_info.is_hdr) {
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_QUALITY_HDR_PREVIEW),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+}
+
 static void paint_main(HWND hWnd, HDC hdc)
 {
     RECT rc;
@@ -1147,9 +1309,14 @@ static void paint_main(HWND hWnd, HDC hdc)
         draw_panel(hdc, &g_rc_panel, text(STR_HW_PANEL));
         draw_hw_test(hdc);
     } else if (g_step == 1) {
-        draw_panel(hdc, &g_rc_panel, text(STR_QUALITY_PANEL));
-        if (g_quality_testing) draw_quality_progress(hdc);
-        else draw_quality(hdc);
+        if (g_quality_preview && !g_quality_testing) {
+            draw_panel(hdc, &g_rc_panel, text(STR_QUALITY_PREVIEW_PANEL));
+            draw_quality_preview(hdc);
+        } else {
+            draw_panel(hdc, &g_rc_panel, text(STR_QUALITY_PANEL));
+            if (g_quality_testing) draw_quality_progress(hdc);
+            else draw_quality(hdc);
+        }
     } else {
         draw_panel(hdc, &g_rc_panel, text(STR_PANEL_VIDEO));
         if (g_probing) {
@@ -1186,8 +1353,9 @@ static void layout_controls(void)
     SetWindowPos(g_hBtnDepth, NULL, S(298), S(388), S(170), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnContinue, NULL, cw - S(32) - btn_w, S(388), btn_w, btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnSkip, NULL, cw - S(32) - S(160), S(388), S(160), btn_h, SWP_NOZORDER);
-    SetWindowPos(g_hBtnBack, NULL, S(32), S(388), S(100), btn_h, SWP_NOZORDER);
-    SetWindowPos(g_hBtnTestAgain, NULL, S(142), S(388), S(140), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnBack, NULL, S(32), S(388), S(140), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnPreview, NULL, S(180), S(388), S(110), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnTestAgain, NULL, S(298), S(388), S(130), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnQCancel, NULL, cw - S(32) - S(170), S(388), S(170), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnCompress, NULL, cw - S(32) - S(140), S(388), S(140), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnDetails, NULL, S(32), S(340), S(150), S(26), SWP_NOZORDER);
@@ -1231,14 +1399,24 @@ static void update_controls_visibility(void)
         if (g_quality_testing) {
             ShowWindow(g_hBtnBack, SW_HIDE);
             ShowWindow(g_hBtnTestAgain, SW_HIDE);
+            ShowWindow(g_hBtnPreview, SW_HIDE);
             ShowWindow(g_hBtnCompress, SW_HIDE);
             ShowWindow(g_hBtnQCancel, SW_SHOW);
             EnableWindow(g_hBtnQCancel, TRUE);
         } else {
+            int idx = quality_level_index(g_quality_selected);
+            int preview_ok = (g_quality_has_result && idx >= 0 && g_est.preview_available[idx]);
             ShowWindow(g_hBtnBack, SW_SHOW);
             ShowWindow(g_hBtnTestAgain, SW_SHOW);
             ShowWindow(g_hBtnQCancel, SW_HIDE);
             ShowWindow(g_hBtnCompress, SW_SHOW);
+            SetWindowTextW(g_hBtnBack, text(g_quality_preview ? STR_QUALITY_BACK_CARDS : STR_QUALITY_BACK));
+            if (g_quality_preview) {
+                ShowWindow(g_hBtnPreview, SW_HIDE);
+            } else {
+                ShowWindow(g_hBtnPreview, SW_SHOW);
+                EnableWindow(g_hBtnPreview, preview_ok ? TRUE : FALSE);
+            }
             EnableWindow(g_hBtnBack, TRUE);
             EnableWindow(g_hBtnTestAgain, TRUE);
             EnableWindow(g_hBtnCompress, g_quality_has_result ? TRUE : FALSE);
@@ -1249,6 +1427,7 @@ static void update_controls_visibility(void)
         ShowWindow(g_hBtnTestAgain, SW_HIDE);
         ShowWindow(g_hBtnQCancel, SW_HIDE);
         ShowWindow(g_hBtnCompress, SW_HIDE);
+        ShowWindow(g_hBtnPreview, SW_HIDE);
         ShowWindow(g_hBtnChoose, SW_SHOW);
         ShowWindow(g_hBtnContinue, SW_SHOW);
         ShowWindow(g_hBtnRetest, SW_SHOW);
@@ -1546,6 +1725,69 @@ static EstimateLevel *quality_level_result(int level)
     return NULL;
 }
 
+static int quality_level_index(int level)
+{
+    int i;
+    for (i = 0; i < g_est.level_count; i++) {
+        if (g_est.levels_used[i] == level) return i;
+    }
+    return -1;
+}
+
+static const wchar_t *quality_ssim_label(double ssim)
+{
+    if (ssim >= 0.98) return text(STR_QUALITY_SSIM_IDENTICAL);
+    if (ssim >= 0.96) return text(STR_QUALITY_SSIM_VERY_GOOD);
+    if (ssim >= 0.93) return text(STR_QUALITY_SSIM_GOOD);
+    if (ssim >= 0.90) return text(STR_QUALITY_SSIM_SOFT);
+    return text(STR_QUALITY_SSIM_LOW);
+}
+
+static void quality_clear_preview_bitmaps(void)
+{
+    if (g_preview_orig_bmp) { DeleteObject(g_preview_orig_bmp); g_preview_orig_bmp = NULL; }
+    if (g_preview_enc_bmp) { DeleteObject(g_preview_enc_bmp); g_preview_enc_bmp = NULL; }
+}
+
+static void quality_cleanup_previews(void)
+{
+    quality_clear_preview_bitmaps();
+    estimate_cleanup_preview_dir(&g_est);
+    g_quality_preview = 0;
+}
+
+static void quality_load_preview(void)
+{
+    wchar_t path[UTIL_PATH_MAX];
+    int index = quality_level_index(g_quality_selected);
+
+    quality_clear_preview_bitmaps();
+    if (index < 0 || !g_est.preview_available[index] || !g_est.preview_dir[0]) return;
+
+    _snwprintf(path, UTIL_PATH_MAX, L"%ls\\prev_%d_orig.bmp", g_est.preview_dir, index);
+    path[UTIL_PATH_MAX - 1] = L'\0';
+    g_preview_orig_bmp = (HBITMAP)LoadImageW(NULL, path, IMAGE_BITMAP, 0, 0,
+                                             LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+    _snwprintf(path, UTIL_PATH_MAX, L"%ls\\prev_%d_enc.bmp", g_est.preview_dir, index);
+    path[UTIL_PATH_MAX - 1] = L'\0';
+    g_preview_enc_bmp = (HBITMAP)LoadImageW(NULL, path, IMAGE_BITMAP, 0, 0,
+                                            LR_LOADFROMFILE | LR_CREATEDIBSECTION);
+}
+
+static void quality_ui_open_preview(HWND hWnd)
+{
+    int index = quality_level_index(g_quality_selected);
+    if (!g_quality_has_result || index < 0 || !g_est.preview_available[index]) {
+        gb_message_box(hWnd, text(STR_QUALITY_PREVIEW_PANEL),
+                       text(STR_QUALITY_PREVIEW_UNAVAILABLE), MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    g_quality_preview = 1;
+    quality_load_preview();
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+
 static void quality_ui_update_selection(void)
 {
     int i;
@@ -1613,6 +1855,7 @@ static void quality_ui_start(HWND hWnd, int force)
     g_quality_testing = 1;
     g_quality_has_result = 0;
     g_quality_gen++;
+    quality_cleanup_previews();
     g_est_cancel = 0;
     g_est_start_tick = GetTickCount64();
     memset(&g_est, 0, sizeof(g_est));
@@ -1652,6 +1895,8 @@ static void quality_ui_on_done(HWND hWnd, EstimateDoneMsg *msg)
         free(msg);
         return;
     }
+    quality_clear_preview_bitmaps();
+    g_quality_preview = 0;
     if (msg->result == ESTIMATE_OK) {
         g_est = msg->est;
         g_quality_has_result = 1;
@@ -1701,6 +1946,13 @@ static void quality_ui_cancel(void)
 static void quality_ui_back(HWND hWnd)
 {
     if (g_quality_testing) return;
+    if (g_quality_preview) {
+        g_quality_preview = 0;
+        quality_clear_preview_bitmaps();
+        update_controls_visibility();
+        InvalidateRect(hWnd, NULL, FALSE);
+        return;
+    }
     g_step = 0;
     update_controls_visibility();
     InvalidateRect(hWnd, NULL, FALSE);
@@ -1715,9 +1967,26 @@ static void quality_ui_compress(HWND hWnd)
 static void quality_select_at(HWND hWnd, int x, int y)
 {
     int i;
+    POINT pt;
+    pt.x = x;
+    pt.y = y;
     if (g_quality_testing || !g_quality_has_result) return;
+    if (g_quality_preview) {
+        for (i = 0; i < g_preview_chip_count; i++) {
+            if (PtInRect(&g_rc_preview_chips[i], pt)) {
+                int level = g_est.levels_used[i];
+                if (level != g_quality_selected) {
+                    g_quality_selected = level;
+                    quality_load_preview();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                return;
+            }
+        }
+        return;
+    }
     for (i = 0; i < g_card_count; i++) {
-        if (PtInRect(&g_rc_cards[i], (POINT){ x, y })) {
+        if (PtInRect(&g_rc_cards[i], pt)) {
             int level = g_est.levels_used[i];
             if (level != g_quality_selected) {
                 g_quality_selected = level;
@@ -1735,6 +2004,7 @@ static void quality_ui_reset(void)
     g_quality_testing = 0;
     g_quality_has_result = 0;
     g_quality_last_seconds = 0.0;
+    quality_cleanup_previews();
     memset(&g_est, 0, sizeof(g_est));
     memset(&g_est_progress, 0, sizeof(g_est_progress));
     g_quality_selected = QUALITY_BALANCED;
@@ -1824,6 +2094,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnCompress = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_COMPRESS),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 140, 38, hWnd, (HMENU)IDC_BTN_COMPRESS, inst, NULL);
+            g_hBtnPreview = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_PREVIEW),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 110, 38, hWnd, (HMENU)IDC_BTN_PREVIEW, inst, NULL);
             g_hBtnMin = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 26, 24, hWnd, (HMENU)IDC_BTN_MIN, inst, NULL);
@@ -1841,6 +2114,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             track_button(g_hBtnTestAgain);
             track_button(g_hBtnQCancel);
             track_button(g_hBtnCompress);
+            track_button(g_hBtnPreview);
             track_button(g_hBtnMin);
             track_button(g_hBtnClose);
 
@@ -1850,6 +2124,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             ShowWindow(g_hBtnTestAgain, SW_HIDE);
             ShowWindow(g_hBtnQCancel, SW_HIDE);
             ShowWindow(g_hBtnCompress, SW_HIDE);
+            ShowWindow(g_hBtnPreview, SW_HIDE);
             EnableWindow(g_hBtnContinue, FALSE);
             layout_controls();
             update_controls_visibility();
@@ -1982,6 +2257,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDC_BTN_SKIP:
                 case IDC_BTN_BACK:
                 case IDC_BTN_TESTAGAIN:
+                case IDC_BTN_PREVIEW:
                     role = GB_ROLE_PUSH;
                     break;
                 case IDC_BTN_CONTINUE:
@@ -2012,6 +2288,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     dis->CtlID == IDC_BTN_SKIP ||
                     dis->CtlID == IDC_BTN_BACK ||
                     dis->CtlID == IDC_BTN_TESTAGAIN ||
+                    dis->CtlID == IDC_BTN_PREVIEW ||
                     dis->CtlID == IDC_BTN_QCANCEL ||
                     dis->CtlID == IDC_BTN_COMPRESS) {
                     font = g_fontSmall;
@@ -2049,6 +2326,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 case IDC_BTN_TESTAGAIN:
                     quality_ui_test_again(hWnd);
+                    return 0;
+                case IDC_BTN_PREVIEW:
+                    quality_ui_open_preview(hWnd);
                     return 0;
                 case IDC_BTN_QCANCEL:
                     quality_ui_cancel();
@@ -2165,6 +2445,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_DESTROY:
             if (g_hw_testing) g_hw_cancel = 1;
             if (g_quality_testing) g_est_cancel = 1;
+            quality_cleanup_previews();
             destroy_fonts();
             g_hWnd = NULL;
             PostQuitMessage(0);

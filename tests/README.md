@@ -31,12 +31,13 @@ file's source URL and licence will be recorded here and in the milestone report.
 ## Real media and estimates
 
 `tests/media/real/` holds the gitignored Big Buck Bunny, Sintel, Jellyfish and
-Jellyfin clips used for M3 verification. Sources and licences are listed in
-`tests/REAL-MEDIA.md`. `tests/media/phone/` is reserved for the phone clips
-described in `tests/PHONE-VIDEO.md`.
+Jellyfin clips used for M3/M4 verification, including 1080p and 4K HDR10 HEVC.
+Sources and licences are listed in `tests/REAL-MEDIA.md`. `tests/media/phone/`
+is reserved for the phone clips described in `tests/PHONE-VIDEO.md`.
 
-`estimate_check.c` runs the same sample-estimate engine as the UI, then a real
-full encode per level, and prints estimated vs actual size/time:
+`estimate_check.c` runs the same sample-estimate engine as the UI, including
+the SSIM measurement and preview-frame extraction, then a real full encode per
+level. It prints estimated vs actual size/time and the median SSIM:
 
 ```cmd
 gcc -std=c11 -O2 -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 ^
@@ -47,6 +48,12 @@ gcc -std=c11 -O2 -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 ^
 
 tests\build\estimate_check.exe tests\media\real\bbb_1080p_30s.mp4 ...
 ```
+
+The M4 verification run is saved in `tests/media/estimate_results_m4_final.txt`
+(gitignored). It covers BBB, Sintel, Jellyfish, 1080p HEVC10 and 4K HDR10.
+All 20 size checks passed; 19/20 time checks passed. The remaining case,
+Sintel Balanced, measured -30.7% against a ±30% target and is treated as a
+borderline miss rather than tuning the model to one clip.
 
 ## Developer diagnostics
 

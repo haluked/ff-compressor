@@ -20,3 +20,16 @@ Captured from the M2 build (218 KB) on Windows 11 at 96 DPI.
 - `m3-cancelled.png` — a cancelled sample test; no estimates are kept.
 
 The test screens are transient; the cards are the normal quality-step state.
+
+## M4 — SSIM and frame preview
+
+- `m4-quality-cards.png` — quality cards now show the median SSIM of the sample
+  encodes next to the size/time estimates.
+- `m4-quality-preview.png` — two-view quality/preview layout: the original and
+  compressed frames side by side, level chips with SSIM, and the selected
+  level's SSIM label.
+- `m4-quality-preview-tiny.png` — the same view after switching to the Tiny
+  level; both the frame and the SSIM summary update.
+- `m4-hdr-cards.png` — HDR10 source: SSIM cards before preview.
+- `m4-hdr-preview.png` — HDR10 preview tone-mapped to SDR with the
+  `HDR preview converted to SDR for display.` note.

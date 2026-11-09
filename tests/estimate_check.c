@@ -125,13 +125,15 @@ int wmain(int argc, wchar_t **argv)
 
             wprintf(L"RESULT clip=%ls level=%ls encoder=%ls "
                     L"est_bytes=%.0f actual_bytes=%lld size_delta=%.1f%% "
-                    L"est_sec=%.2f actual_sec=%.2f time_delta=%.1f%% %ls\n",
+                    L"est_sec=%.2f actual_sec=%.2f time_delta=%.1f%% "
+                    L"ssim=%.4f %ls\n",
                     src.file_name, presets_level_name(e->level),
                     hw_encoder_name(est.encoder),
                     e->est_size_bytes, actual_bytes, size_delta,
                     e->est_seconds, actual_sec, time_delta,
-                    pass ? L"PASS" : L"FAIL");
+                    e->ssim, pass ? L"PASS" : L"FAIL");
         }
+        estimate_cleanup_preview_dir(&est);
     }
     RemoveDirectoryW(tempdir);
     return 0;

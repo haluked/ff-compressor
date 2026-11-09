@@ -4,10 +4,10 @@ A small, native Windows video compressor built in C with a Game Boy-inspired
 interface. It uses a portable FFmpeg build for analysis and encoding; the
 application itself has no Python, .NET, Electron or Qt runtime.
 
-**Status:** M3 (analysis, hardware test and sample-based quality estimates) is
-implemented. SSIM/frame preview and compression arrive in M4–M6.
+**Status:** M4 (analysis, hardware test, sample-based quality estimates, SSIM
+and frame preview) is implemented. Compression arrives in M5–M6.
 
-## What works in M1–M3
+## What works in M1–M4
 
 - Choose a video with the file picker or drag and drop it onto the window.
 - Read it with `ffprobe` in a background worker.
@@ -45,12 +45,26 @@ implemented. SSIM/frame preview and compression arrive in M4–M6.
   confirmation that shows the previous measured duration (or a conservative
   estimate on the first run). It is cancellable and caches results for the
   current file/profile.
+- Every quality level shows a median **SSIM** from its sample encodes, with a
+  plain-language label (`Visually identical`, `Very good`, `Good`,
+  `Visible softening`, `Low quality`). SSIM is guidance; the frame preview is
+  the real judge.
+- `PREVIEW` opens a two-view layout with the original and compressed frames
+  side by side, level chips that switch both the frame and the SSIM summary,
+  and `BACK TO CARDS`. Frames are extracted by FFmpeg at the first sample
+  position. HDR10/HLG sources are tone-mapped to SDR for display and carry an
+  on-screen note.
 - Estimate ranges are shown as guidance. Results are verified against real
-  footage in `tests/REAL-MEDIA.md`. On the M3 set (5 clips × 4 levels = 20
-  checks), size error was **+2.1% to -11.0%** and time error was **-23.2% to
-  +29.0%**, all inside the ±20% / ±30% targets.
+  footage in `tests/REAL-MEDIA.md`. On the M4 set (5 clips × 4 levels = 20
+  checks), size error was **+2.1% to -11.0%**. 19 of 20 time checks were inside
+  ±30% (range **-30.7% to +9.1%**); the one borderline case was Sintel at
+  Balanced (-30.7%), where the full encode finished slightly faster than the
+  conservative sample model predicted. It is reported rather than hidden.
 - The quality-demo label shows a conservative range before the first run and the
-  previous measured duration on repeat runs.
+  previous measured duration on repeat runs. `TEST AGAIN` keeps the same
+  SSIM/preview path, so a re-test refreshes all displayed values.
+- Preview bitmaps live in the per-run demo directory and are removed when the
+  video changes, the estimate is reset, or the window closes.
 - NVENC/QSV are tested at runtime on the user's machine. On the AMD-only
   development PC they are marked `untested_on_hardware`; a failing GPU encoder
   falls back to CPU x265 with a clear status message.

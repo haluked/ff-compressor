@@ -20,6 +20,8 @@ typedef struct {
     double est_seconds_max;
     double sample_video_bps;
     double sample_speed;
+    double ssim;
+    int ssim_available;
     int clips;
     double clip_seconds;
 } EstimateLevel;
@@ -35,6 +37,9 @@ typedef struct {
     int profile;
     double total_seconds;
     int complete;
+    wchar_t preview_dir[UTIL_PATH_MAX];
+    int preview_available[ESTIMATE_MAX_LEVELS];
+    double preview_time;
 } EstimateSet;
 
 typedef struct {
@@ -67,5 +72,7 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
                             int profile_override, EstimateSet *out,
                             EstimateProgressCallback cb, void *user,
                             volatile int *cancel);
+
+void estimate_cleanup_preview_dir(EstimateSet *set);
 
 #endif /* ESTIMATE_H */
