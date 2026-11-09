@@ -15,6 +15,8 @@ typedef enum {
     UTIL_RUN_OOM
 } UtilRunResult;
 
+typedef void (*UtilLineCallback)(const char *line, size_t len, void *user);
+
 /* Run a hidden child process, capture merged stdout/stderr (bounded), and
    return its exit code. `cancel` is polled every 20 ms; `timeout_ms` 0 means
    no timeout. The caller owns the returned buffer. */
@@ -22,6 +24,14 @@ UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
                                volatile int *cancel,
                                char **out, size_t *out_len,
                                DWORD *exit_code);
+
+/* Same as util_run_capture, but also calls cb for every complete line of
+   merged output while the process runs. Used for FFmpeg progress. */
+UtilRunResult util_run_lines(const wchar_t *cmd, DWORD timeout_ms,
+                             volatile int *cancel,
+                             UtilLineCallback cb, void *user,
+                             char **out, size_t *out_len,
+                             DWORD *exit_code);
 
 int  util_file_exists(const wchar_t *path);
 int  util_dir_exists(const wchar_t *path);

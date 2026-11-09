@@ -14,8 +14,14 @@ typedef enum {
     QUALITY_LEVEL_COUNT = 4
 } QualityLevel;
 
+#define PRESETS_VIDEO_HEVC 0
+#define PRESETS_VIDEO_H264 1
+
 int presets_video_args(const SourceInfo *src, int encoder, int level,
                        wchar_t *out, size_t cap);
+
+int presets_video_args_ex(const SourceInfo *src, int encoder, int level,
+                          int video_codec, wchar_t *out, size_t cap);
 
 int presets_build_sample_cmd(const SourceInfo *src, int encoder, int level,
                              double start_sec, double duration_sec,

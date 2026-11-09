@@ -59,7 +59,14 @@ const wchar_t *presets_level_note(int level)
 int presets_video_args(const SourceInfo *src, int encoder, int level,
                        wchar_t *out, size_t cap)
 {
+    return presets_video_args_ex(src, encoder, level, PRESETS_VIDEO_HEVC, out, cap);
+}
+
+int presets_video_args_ex(const SourceInfo *src, int encoder, int level,
+                          int video_codec, wchar_t *out, size_t cap)
+{
     static const int q_x265[4] = { 30, 27, 24, 21 };
+    static const int q_x264[4] = { 30, 27, 24, 21 };
     static const int q_nvenc[4] = { 36, 33, 30, 27 };
     static const int q_qsv[4] = { 34, 31, 28, 25 };
     static const int q_amf[4] = { 36, 33, 30, 27 };
@@ -80,6 +87,19 @@ int presets_video_args(const SourceInfo *src, int encoder, int level,
             color_or(src->color_space, src->is_hdr ? L"bt2020nc" : L"bt709"),
             color_or(src->color_range, L"tv"));
         color[383] = L'\0';
+    }
+
+    if (video_codec == PRESETS_VIDEO_H264) {
+        q = q_x264[level];
+        /* H.264 is always CPU x264: maximum compatibility and predictable
+           quality. HDR sources are tone-mapped by the caller and therefore
+           must not inherit the BT.2020/PQ tags here. */
+        _snwprintf(out, cap,
+            L"-c:v libx264 -preset medium -crf %d -pix_fmt yuv420p "
+            L"-profile:v high%s",
+            q, src->is_hdr ? L"" : color);
+        out[cap - 1] = L'\0';
+        return out[0] != L'\0';
     }
 
     if (encoder == HW_ENC_X265) {

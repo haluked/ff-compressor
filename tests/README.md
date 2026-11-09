@@ -23,6 +23,10 @@ repository clean, and they cover the metadata shapes the app must handle.
 | `hdr10_10bit_1080p_10s.mkv` | 10-bit HEVC, BT.2020/PQ, HDR10 metadata |
 | `anamorphic_720x480_10s.mp4` | Non-square pixel aspect ratio |
 | `phone_4k_60mbps_20s.mp4` | High-bitrate 4K phone-style source |
+| `low_audio_24k.mp4` | 24k AAC source for the audio-copy threshold |
+| `audio_128k_5s.mp4` | 128k AAC source for audio re-encoding |
+| `multichannel_5s.mkv` | 5.1 AAC source for downmix planning |
+| `multi_audio_5s.mkv` | Two audio tracks with different codecs |
 
 Real-world clips (Big Buck Bunny, Jellyfish, Xiph) will only be added if a
 milestone needs footage that synthetic sources cannot represent. If added, each
@@ -55,11 +59,34 @@ All 20 size checks passed; 19/20 time checks passed. The remaining case,
 Sintel Balanced, measured -30.7% against a ±30% target and is treated as a
 borderline miss rather than tuning the model to one clip.
 
+## Encode verification
+
+`encode_check.c` runs the real `encode_run()` path and probes the output:
+
+```cmd
+gcc -std=c11 -O2 -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 ^
+    -Isrc tests\encode_check.c src\probe.c src\hw.c src\presets.c ^
+    src\estimate.c src\encode.c src\util.c src\strings.c src\cjson.c ^
+    -o tests\build\encode_check.exe ^
+    -lole32 -luuid -ldxguid -lshell32 -ladvapi32 -lgdi32 -luser32
+
+tests\build\encode_check.exe <input> <mkv|mp4> <h265|h264> ^
+    <copy|opus|aac|mp3|flac|ac3|eac3|vorbis> <kbps> <level> [runs] [cancel_ms]
+```
+
+The M5 matrix covered both containers, both video codecs, every audio codec,
+copy-vs-encode thresholds, multiple audio tracks, 5.1 downmix, subtitle copy and
+`mov_text` conversion, HDR-to-H.265 and HDR-to-H.264, VFR/anamorphic/rotated
+sources, repeated no-overwrite runs, and cancellation. Results are saved in
+`tests/media/encode_results_m5.txt` (gitignored).
+
 ## Developer diagnostics
 
 - `hwtest_cli.c` — runs the first-launch hardware test N times with the same
   code as the UI and prints the measured speeds/profile.
 - `estimate_check.c` — verifies sample estimates against real full encodes.
+- `encode_check.c` — runs full encodes across container/codec combinations and
+  verifies the output streams.
 - `fallback_check.c` — advertises NVENC on this AMD machine, forces a failing
   sample and verifies the CPU x265 fallback path.
 - `hw_detect.c` — prints CPU, GPU, driver and FFmpeg encoder detection.

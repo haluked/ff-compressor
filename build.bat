@@ -31,6 +31,7 @@ gcc -std=c11 -O3 -s -flto ^
     src\hw.c ^
     src\presets.c ^
     src\estimate.c ^
+    src\encode.c ^
     src\util.c ^
     src\strings.c ^
     src\cjson.c ^

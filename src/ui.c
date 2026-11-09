@@ -5,6 +5,7 @@
 #include "probe.h"
 #include "presets.h"
 #include "estimate.h"
+#include "encode.h"
 #include "strings.h"
 #include "util.h"
 #include "gb_ui.h"
@@ -39,6 +40,19 @@
 #define IDC_BTN_QCANCEL  3011
 #define IDC_BTN_COMPRESS 3012
 #define IDC_BTN_PREVIEW  3013
+#define IDC_BTN_CONT_MKV 3014
+#define IDC_BTN_CONT_MP4 3015
+#define IDC_BTN_VC_HEVC 3016
+#define IDC_BTN_VC_H264 3017
+#define IDC_BTN_AUDIO   3018
+#define IDC_BTN_ABITRATE 3019
+#define IDC_BTN_DOWNMIX 3020
+#define IDC_BTN_START   3021
+#define IDC_BTN_ECANCEL 3022
+#define IDC_BTN_SHOW    3023
+#define IDC_BTN_INPUT_OK 3024
+#define IDC_BTN_INPUT_CANCEL 3025
+#define IDC_EDIT_CUSTOM 3026
 
 #define BASE_CLIENT_W 646
 #define BASE_CLIENT_H 485
@@ -46,7 +60,7 @@
 #define APP_WINDOW_STYLE    (WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU)
 #define APP_WINDOW_EX_STYLE (WS_EX_APPWINDOW | WS_EX_CONTROLPARENT)
 
-#define GB_MAX_TRACKED 8
+#define GB_MAX_TRACKED 32
 typedef struct {
     HWND hwnd;
     WNDPROC old_proc;
@@ -67,6 +81,21 @@ static HWND g_hBtnTestAgain = NULL;
 static HWND g_hBtnQCancel = NULL;
 static HWND g_hBtnCompress = NULL;
 static HWND g_hBtnPreview = NULL;
+static HWND g_hBtnContMkv = NULL;
+static HWND g_hBtnContMp4 = NULL;
+static HWND g_hBtnVcHevc = NULL;
+static HWND g_hBtnVcH264 = NULL;
+static HWND g_hBtnAudio = NULL;
+static HWND g_hBtnABitrate = NULL;
+static HWND g_hBtnDownmix = NULL;
+static HWND g_hBtnStart = NULL;
+static HWND g_hBtnECancel = NULL;
+static HWND g_hBtnShow = NULL;
+static HWND g_hBtnInputOk = NULL;
+static HWND g_hBtnInputCancel = NULL;
+static HWND g_hEditCustom = NULL;
+static HBRUSH g_brushLightest = NULL;
+static WNDPROC g_edit_old_proc = NULL;
 
 static HFONT g_fontTitle = NULL;
 static HFONT g_fontBold = NULL;
@@ -125,6 +154,21 @@ static HBITMAP g_preview_enc_bmp = NULL;
 static RECT g_rc_preview_chips[ESTIMATE_MAX_LEVELS];
 static int g_preview_chip_count = 0;
 
+static EncodeOptions g_enc_opt;
+static int g_encode_state = 0; /* 0 settings, 1 running, 2 done, 3 error */
+static int g_enc_options_ready = 0;
+static int g_encode_gen = 0;
+static EncodeProgress g_encode_progress;
+static ULONGLONG g_encode_start_tick = 0;
+static volatile int g_encode_cancel = 0;
+static wchar_t g_encode_output[UTIL_PATH_MAX];
+static wchar_t g_encode_detail[512];
+static EncodeError g_encode_error_code = ENCODE_ERR_NONE;
+static long long g_encode_size = 0;
+static int g_input_active = 0;
+static wchar_t g_audio_items[ENC_ACODEC_COUNT][48];
+static wchar_t g_bitrate_items[4][48];
+
 typedef struct {
     ProbeError error;
     SourceInfo info;
@@ -146,6 +190,20 @@ typedef struct {
     EstimateProgress progress;
 } EstProgressMsg;
 
+typedef struct {
+    int gen;
+    EncodeProgress progress;
+} EncodeProgressMsg;
+
+typedef struct {
+    int gen;
+    EncodeResult result;
+    wchar_t path[UTIL_PATH_MAX];
+    long long size;
+    EncodeError error_code;
+    wchar_t detail[512];
+} EncodeDoneMsg;
+
 static void layout_controls(void);
 static void update_controls_visibility(void);
 static void start_probe(HWND hWnd, const wchar_t *path);
@@ -164,6 +222,21 @@ static void quality_clear_preview_bitmaps(void);
 static void quality_cleanup_previews(void);
 static void quality_load_preview(void);
 static const wchar_t *quality_ssim_label(double ssim);
+
+static void encode_ui_enter(HWND hWnd);
+static void encode_ui_reset(void);
+static void encode_ui_update_controls(void);
+static void encode_ui_start(HWND hWnd);
+static void encode_ui_cancel(void);
+static void encode_ui_back(HWND hWnd);
+static void encode_ui_open_custom(HWND hWnd);
+static void encode_ui_close_custom(void);
+static void encode_ui_accept_custom(HWND hWnd);
+static void encode_ui_open_audio_dropdown(HWND hWnd);
+static void encode_ui_open_bitrate_dropdown(HWND hWnd);
+static void encode_ui_on_done(HWND hWnd, EncodeDoneMsg *msg);
+static const wchar_t *encode_error_text(EncodeError err);
+static const wchar_t *encode_video_encoder_name(void);
 
 static int S(int value)
 {
@@ -206,6 +279,26 @@ static LRESULT CALLBACK tracked_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
     return old ? CallWindowProcW(old, hwnd, msg, wParam, lParam)
                : DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK custom_edit_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (msg == WM_KEYDOWN) {
+        if (wParam == VK_RETURN) {
+            SendMessageW(GetParent(hwnd), WM_COMMAND,
+                         MAKEWPARAM(IDC_BTN_INPUT_OK, BN_CLICKED), 0);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            SendMessageW(GetParent(hwnd), WM_COMMAND,
+                         MAKEWPARAM(IDC_BTN_INPUT_CANCEL, BN_CLICKED), 0);
+            return 0;
+        }
+    }
+    if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) return 0;
+    return g_edit_old_proc
+        ? CallWindowProcW(g_edit_old_proc, hwnd, msg, wParam, lParam)
+        : DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 static void track_button(HWND hwnd)
@@ -1275,6 +1368,412 @@ static void draw_quality_preview(HDC hdc)
     }
 }
 
+static const wchar_t *bitrate_preset_name(int preset)
+{
+    switch (preset) {
+        case ENC_ABITRATE_VOICE:  return text(STR_COMP_BITRATE_VOICE);
+        case ENC_ABITRATE_MUSIC:  return text(STR_COMP_BITRATE_MUSIC);
+        case ENC_ABITRATE_HIGH:   return text(STR_COMP_BITRATE_HIGH);
+        default:                  return text(STR_COMP_BITRATE_CUSTOM);
+    }
+}
+
+static const wchar_t *encode_audio_codec_label(int codec)
+{
+    switch (codec) {
+        case ENC_ACODEC_COPY:   return text(STR_COMP_AUDIO_COPY_LABEL);
+        case ENC_ACODEC_OPUS:   return text(STR_CODEC_OPUS);
+        case ENC_ACODEC_AAC:    return text(STR_CODEC_AAC);
+        case ENC_ACODEC_MP3:    return text(STR_CODEC_MP3);
+        case ENC_ACODEC_FLAC:   return text(STR_CODEC_FLAC);
+        case ENC_ACODEC_AC3:    return text(STR_CODEC_AC3);
+        case ENC_ACODEC_EAC3:   return text(STR_CODEC_EAC3);
+        case ENC_ACODEC_VORBIS: return text(STR_CODEC_VORBIS);
+        default:                return text(STR_VALUE_UNKNOWN);
+    }
+}
+
+static const wchar_t *encode_video_encoder_name(void)
+{
+    int enc;
+    if (g_enc_opt.video_codec == ENC_VCODEC_H264) return text(STR_ENC_X264);
+    enc = g_quality_has_result ? g_est.encoder
+                               : estimate_choose_encoder(&g_info, &g_hw_info);
+    return hw_encoder_name(enc);
+}
+
+static const wchar_t *encode_error_text(EncodeError err)
+{
+    switch (err) {
+        case ENCODE_ERR_TOOL:    return text(STR_COMP_ERR_TOOL);
+        case ENCODE_ERR_CODEC:   return text(STR_COMP_ERR_CODEC);
+        case ENCODE_ERR_AUDIO:   return text(STR_COMP_ERR_AUDIO);
+        case ENCODE_ERR_SUBS:    return text(STR_COMP_ERR_SUBS);
+        case ENCODE_ERR_PATH:    return text(STR_COMP_ERR_PATH);
+        case ENCODE_ERR_FOLDER:  return text(STR_COMP_ERR_FOLDER);
+        case ENCODE_ERR_START:   return text(STR_COMP_ERR_START);
+        case ENCODE_ERR_FFMPEG:  return text(STR_COMP_ERR_FFMPEG);
+        case ENCODE_ERR_VERIFY:  return text(STR_COMP_ERR_VERIFY);
+        case ENCODE_ERR_RENAME:  return text(STR_COMP_ERR_RENAME);
+        case ENCODE_ERR_OUT_OF_MEMORY: return text(STR_COMP_ERR_MEMORY);
+        default:                 return text(STR_COMP_FAILED);
+    }
+}
+
+static void bitrate_button_text(wchar_t *out, size_t cap)
+{
+    if (!out || cap == 0) return;
+    if (!encode_audio_has_bitrate(g_enc_opt.audio_codec)) {
+        wcsncpy(out, g_enc_opt.audio_codec == ENC_ACODEC_COPY
+                    ? text(STR_COMP_NO_BITRATE_COPY)
+                    : text(STR_COMP_NO_BITRATE_FLAC), cap - 1);
+        out[cap - 1] = L'\0';
+        return;
+    }
+    _snwprintf(out, cap, text(STR_COMP_BITRATE_VALUE_FMT),
+               bitrate_preset_name(g_enc_opt.bitrate),
+               encode_bitrate_kbps(&g_enc_opt));
+    out[cap - 1] = L'\0';
+}
+
+static void update_audio_dropdown_items(void)
+{
+    int codec, i = 0;
+    for (codec = 0; codec < ENC_ACODEC_COUNT; codec++) {
+        if (!encode_audio_available(g_enc_opt.container, codec)) continue;
+        if (codec == ENC_ACODEC_COPY &&
+            !encode_audio_copy_available(&g_info, g_enc_opt.container)) continue;
+        wcsncpy(g_audio_items[i], encode_audio_codec_label(codec), 47);
+        g_audio_items[i][47] = L'\0';
+        i++;
+    }
+}
+
+static void update_bitrate_dropdown_items(void)
+{
+    int n = 0;
+    if (g_enc_opt.audio_codec == ENC_ACODEC_AC3 ||
+        g_enc_opt.audio_codec == ENC_ACODEC_EAC3) {
+        wcsncpy(g_bitrate_items[n++], text(STR_COMP_BITRATE_HIGH), 47);
+    } else {
+        wcsncpy(g_bitrate_items[n++], text(STR_COMP_BITRATE_VOICE), 47);
+        wcsncpy(g_bitrate_items[n++], text(STR_COMP_BITRATE_MUSIC), 47);
+        wcsncpy(g_bitrate_items[n++], text(STR_COMP_BITRATE_HIGH), 47);
+    }
+    {
+        wchar_t custom[48];
+        _snwprintf(custom, 48, L"%ls %d kbps",
+                   text(STR_COMP_BITRATE_CUSTOM),
+                   g_enc_opt.bitrate == ENC_ABITRATE_CUSTOM
+                       ? g_enc_opt.custom_kbps : ENC_BITRATE_HIGH_KBPS);
+        custom[47] = L'\0';
+        wcsncpy(g_bitrate_items[n++], custom, 47);
+    }
+    while (n < 4) {
+        g_bitrate_items[n][0] = L'\0';
+        n++;
+    }
+}
+
+static void draw_compress_settings(HDC hdc)
+{
+    wchar_t buf[1024];
+    wchar_t tmp[512];
+    wchar_t path[UTIL_PATH_MAX];
+    wchar_t size[64], time[64];
+    RECT r;
+    EstimateLevel *sel = quality_level_result(g_quality_selected);
+    int has_audio = g_info.audio_track_count > 0;
+    int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
+    int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
+    int i, copies = 0, encoded;
+    const wchar_t *path_note = text(STR_COMP_OUTPUT_UNKNOWN);
+
+    SetRect(&r, S(32), S(108), S(614), S(128));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r, text(STR_COMP_HEADING),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    _snwprintf(buf, 1024, text(STR_COMP_QUALITY_FMT),
+               presets_level_name(g_quality_selected),
+               encode_video_encoder_name());
+    buf[1023] = L'\0';
+    SetRect(&r, S(32), S(126), S(360), S(142));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    if (sel && sel->available) {
+        util_format_bytes((long long)sel->est_size_bytes, size, 64);
+        util_format_duration(sel->est_seconds, time, 64);
+        _snwprintf(buf, 1024,
+                   text(g_enc_opt.video_codec == ENC_VCODEC_H264
+                        ? STR_COMP_ESTIMATE_H264_FMT : STR_COMP_ESTIMATE_FMT),
+                   size, time);
+    } else {
+        wcsncpy(buf, text(STR_QUALITY_NO_ESTIMATE), 1023);
+    }
+    buf[1023] = L'\0';
+    SetRect(&r, S(360), S(126), S(614), S(142));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(150), S(104), S(178));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_FORMAT_LABEL),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(188), S(104), S(216));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_VIDEO_LABEL),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(226), S(104), S(254));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_AUDIO_LABEL),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    if (!has_audio) {
+        SetRect(&r, S(110), S(226), S(614), S(254));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_AUDIO_NONE),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    } else if (!has_bitrate) {
+        SetRect(&r, S(292), S(226), S(614), S(254));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r,
+                g_enc_opt.audio_codec == ENC_ACODEC_COPY
+                    ? text(STR_COMP_NO_BITRATE_COPY)
+                    : text(STR_COMP_NO_BITRATE_FLAC),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    if (encode_preview_output_path(&g_info, g_enc_opt.container,
+                                   path, UTIL_PATH_MAX)) {
+        _snwprintf(buf, 1024, text(STR_COMP_OUTPUT_FMT), path);
+        path_note = NULL;
+    } else {
+        buf[0] = L'\0';
+    }
+    SetRect(&r, S(32), S(278), S(614), S(296));
+    if (path_note) {
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, path_note,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else {
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    /* Audio summary. */
+    if (has_audio) {
+        if (g_enc_opt.audio_codec == ENC_ACODEC_COPY) {
+            _snwprintf(buf, 1024, text(STR_COMP_AUDIO_COPY_SUMMARY_FMT),
+                       g_info.audio_track_count);
+        } else if (g_enc_opt.audio_codec == ENC_ACODEC_FLAC) {
+            _snwprintf(buf, 1024, text(STR_COMP_AUDIO_FLAC_SUMMARY_FMT),
+                       g_info.audio_track_count);
+        } else {
+            for (i = 0; i < g_info.audio_tracks_stored; i++) {
+                if (encode_audio_track_copies(&g_info, &g_enc_opt, i)) copies++;
+            }
+            encoded = g_info.audio_track_count - copies;
+            if (encoded < 0) encoded = 0;
+            _snwprintf(buf, 1024, text(STR_COMP_AUDIO_SUMMARY_FMT),
+                       g_info.audio_track_count, copies, encoded,
+                       encode_bitrate_kbps(&g_enc_opt));
+        }
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(299), S(614), S(315));
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    /* Subtitle summary. */
+    if (g_info.subtitle_track_count <= 0) {
+        wcsncpy(buf, text(STR_COMP_SUBS_NONE), 1023);
+    } else if (g_enc_opt.container == ENC_CONT_MKV) {
+        _snwprintf(buf, 1024, text(STR_COMP_SUBS_COPY_FMT),
+                   g_info.subtitle_track_count);
+    } else {
+        int text_subs = encode_text_subtitle_count(&g_info);
+        int bitmap_subs = encode_bitmap_subtitle_count(&g_info);
+        buf[0] = L'\0';
+        if (text_subs > 0) {
+            _snwprintf(tmp, 512, text(STR_COMP_SUBS_CONVERT_FMT), text_subs);
+            tmp[511] = L'\0';
+            wcscat(buf, tmp);
+        }
+        if (bitmap_subs > 0) {
+            _snwprintf(tmp, 512, text(STR_COMP_SUBS_DROP_FMT), bitmap_subs);
+            tmp[511] = L'\0';
+            if (buf[0]) wcscat(buf, L" ");
+            wcscat(buf, tmp);
+        }
+    }
+    buf[1023] = L'\0';
+    SetRect(&r, S(32), S(317), S(614), S(333));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    /* Context note: HDR conversion, downmix, or the persistent Opus note. */
+    if (g_info.is_hdr && g_enc_opt.video_codec == ENC_VCODEC_H264) {
+        wcsncpy(buf, text(STR_COMP_HDR_TONEMAP), 1023);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(336), S(614), S(352));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else if (downmix_visible) {
+        wcsncpy(buf, text(STR_COMP_DOWNMIX_NOTE), 1023);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(336), S(614), S(352));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    SetRect(&r, S(32), S(354), S(614), S(372));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r,
+            g_enc_opt.container == ENC_CONT_MKV
+                ? text(STR_COMP_OPUS_NOTE)
+                : text(STR_COMP_HINT),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+
+static void draw_compress_progress(HDC hdc)
+{
+    wchar_t buf[512];
+    RECT r, bar;
+    int percent = (int)(g_encode_progress.fraction * 100.0);
+    int elapsed = (int)((GetTickCount64() - g_encode_start_tick) / 1000);
+    int total = 0;
+    EstimateLevel *sel = quality_level_result(g_quality_selected);
+
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    if (sel && sel->available) total = (int)(sel->est_seconds + 0.5);
+
+    SetRect(&r, S(32), S(112), S(614), S(132));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r,
+            text(g_encode_progress.verifying ? STR_COMP_VERIFYING
+                                             : STR_COMP_PROGRESS_HEADING),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(138), S(614), S(162));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, g_info.file_name,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    SetRect(&bar, S(32), S(176), S(614), S(192));
+    draw_progress_bar(hdc, &bar, percent);
+
+    _snwprintf(buf, 512, text(STR_COMP_PROGRESS_FMT), percent);
+    buf[511] = L'\0';
+    SetRect(&r, S(32), S(200), S(614), S(224));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    if (total > 0) {
+        _snwprintf(buf, 512, text(STR_COMP_ELAPSED_FMT), elapsed, total);
+    } else {
+        _snwprintf(buf, 512, text(STR_HW_ELAPSED_FMT), elapsed);
+    }
+    buf[511] = L'\0';
+    SetRect(&r, S(32), S(228), S(614), S(248));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    if (g_encode_progress.speed > 0.0) {
+        _snwprintf(buf, 512, L"%.2fx", g_encode_progress.speed);
+        buf[511] = L'\0';
+        SetRect(&r, S(32), S(250), S(614), S(268));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    SetRect(&r, S(32), S(300), S(614), S(352));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_PROGRESS_NOTE),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+}
+
+static void draw_compress_done(HDC hdc)
+{
+    wchar_t buf[1024];
+    wchar_t size[64];
+    wchar_t folder[UTIL_PATH_MAX];
+    RECT r;
+
+    SetRect(&r, S(32), S(112), S(614), S(132));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r, text(STR_COMP_DONE_HEADING),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    util_dirname(g_encode_output, folder, UTIL_PATH_MAX);
+    _snwprintf(buf, 1024, text(STR_COMP_DONE_FOLDER_FMT), folder);
+    buf[1023] = L'\0';
+    SetRect(&r, S(32), S(140), S(614), S(158));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
+
+    _snwprintf(buf, 1024, text(STR_COMP_DONE_FILE_FMT),
+               util_basename(g_encode_output));
+    buf[1023] = L'\0';
+    SetRect(&r, S(32), S(160), S(614), S(180));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    util_format_bytes(g_encode_size, size, 64);
+    _snwprintf(buf, 1024, text(STR_COMP_DONE_SIZE_FMT), size);
+    buf[1023] = L'\0';
+    SetRect(&r, S(32), S(190), S(614), S(212));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(220), S(614), S(258));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_DONE_VERIFIED),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(286), S(614), S(304));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_DONE_NOTE),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+}
+
+static void draw_compress_error(HDC hdc)
+{
+    wchar_t buf[1024];
+    RECT r;
+
+    SetRect(&r, S(32), S(112), S(614), S(134));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r, text(STR_COMP_FAILED),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(146), S(614), S(196));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, encode_error_text(g_encode_error_code),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    if (g_encode_detail[0]) {
+        _snwprintf(buf, 1024, text(STR_COMP_DETAIL_FMT), g_encode_detail);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(206), S(614), S(300));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    SetRect(&r, S(32), S(316), S(614), S(348));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_PROGRESS_NOTE),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+}
+
+static void draw_custom_input(HDC hdc)
+{
+    wchar_t buf[256];
+    RECT r;
+    int min_kbps = encode_audio_min_kbps(g_enc_opt.audio_codec);
+
+    SetRect(&r, S(32), S(108), S(614), S(130));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r, text(STR_COMP_CUSTOM_HEADING),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    _snwprintf(buf, 256, text(STR_COMP_CUSTOM_FMT), min_kbps,
+               ENC_BITRATE_MAX_KBPS);
+    buf[255] = L'\0';
+    SetRect(&r, S(32), S(140), S(614), S(180));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    SetRect(&r, S(106), S(186), S(334), S(222));
+    gb_frame(hdc, &r, GB_DARKEST, S(2));
+}
+
 static void paint_main(HWND hWnd, HDC hdc)
 {
     RECT rc;
@@ -1305,9 +1804,18 @@ static void paint_main(HWND hWnd, HDC hdc)
     }
 
     draw_steps(hdc, cw);
-    if (g_hw_testing) {
+    if (g_input_active) {
+        draw_panel(hdc, &g_rc_panel, text(STR_COMP_CUSTOM_TITLE));
+        draw_custom_input(hdc);
+    } else if (g_hw_testing) {
         draw_panel(hdc, &g_rc_panel, text(STR_HW_PANEL));
         draw_hw_test(hdc);
+    } else if (g_step == 2) {
+        draw_panel(hdc, &g_rc_panel, text(STR_COMP_PANEL));
+        if (g_encode_state == 1) draw_compress_progress(hdc);
+        else if (g_encode_state == 2) draw_compress_done(hdc);
+        else if (g_encode_state == 3) draw_compress_error(hdc);
+        else draw_compress_settings(hdc);
     } else if (g_step == 1) {
         if (g_quality_preview && !g_quality_testing) {
             draw_panel(hdc, &g_rc_panel, text(STR_QUALITY_PREVIEW_PANEL));
@@ -1360,6 +1868,20 @@ static void layout_controls(void)
     SetWindowPos(g_hBtnCompress, NULL, cw - S(32) - S(140), S(388), S(140), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnDetails, NULL, S(32), S(340), S(150), S(26), SWP_NOZORDER);
 
+    SetWindowPos(g_hBtnContMkv, NULL, S(110), S(146), S(70), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnContMp4, NULL, S(186), S(146), S(70), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnVcHevc, NULL, S(110), S(184), S(150), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnVcH264, NULL, S(266), S(184), S(150), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAudio, NULL, S(110), S(222), S(170), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnABitrate, NULL, S(292), S(222), S(170), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnDownmix, NULL, S(110), S(258), S(220), S(26), SWP_NOZORDER);
+    SetWindowPos(g_hBtnStart, NULL, cw - S(32) - S(180), S(388), S(180), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnECancel, NULL, cw - S(32) - S(170), S(388), S(170), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnShow, NULL, cw - S(32) - S(180), S(388), S(180), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hEditCustom, NULL, S(110), S(190), S(220), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnInputOk, NULL, S(110), S(250), S(100), S(32), SWP_NOZORDER);
+    SetWindowPos(g_hBtnInputCancel, NULL, S(222), S(250), S(110), S(32), SWP_NOZORDER);
+
     {
         int close_w = S(26);
         int close_h = S(24);
@@ -1373,11 +1895,45 @@ static void layout_controls(void)
     InvalidateRect(g_hWnd, NULL, TRUE);
 }
 
+static void hide_encode_controls(void)
+{
+    ShowWindow(g_hBtnContMkv, SW_HIDE);
+    ShowWindow(g_hBtnContMp4, SW_HIDE);
+    ShowWindow(g_hBtnVcHevc, SW_HIDE);
+    ShowWindow(g_hBtnVcH264, SW_HIDE);
+    ShowWindow(g_hBtnAudio, SW_HIDE);
+    ShowWindow(g_hBtnABitrate, SW_HIDE);
+    ShowWindow(g_hBtnDownmix, SW_HIDE);
+    ShowWindow(g_hBtnStart, SW_HIDE);
+    ShowWindow(g_hBtnECancel, SW_HIDE);
+    ShowWindow(g_hBtnShow, SW_HIDE);
+    ShowWindow(g_hBtnInputOk, SW_HIDE);
+    ShowWindow(g_hBtnInputCancel, SW_HIDE);
+    ShowWindow(g_hEditCustom, SW_HIDE);
+}
+
 static void update_controls_visibility(void)
 {
     if (!g_hWnd) return;
+    hide_encode_controls();
 
-    if (g_hw_testing) {
+    if (g_input_active) {
+        ShowWindow(g_hBtnChoose, SW_HIDE);
+        ShowWindow(g_hBtnContinue, SW_HIDE);
+        ShowWindow(g_hBtnDetails, SW_HIDE);
+        ShowWindow(g_hBtnRetest, SW_HIDE);
+        ShowWindow(g_hBtnDepth, SW_HIDE);
+        ShowWindow(g_hBtnSkip, SW_HIDE);
+        ShowWindow(g_hBtnBack, SW_HIDE);
+        ShowWindow(g_hBtnTestAgain, SW_HIDE);
+        ShowWindow(g_hBtnQCancel, SW_HIDE);
+        ShowWindow(g_hBtnCompress, SW_HIDE);
+        ShowWindow(g_hBtnPreview, SW_HIDE);
+        ShowWindow(g_hEditCustom, SW_SHOW);
+        ShowWindow(g_hBtnInputOk, SW_SHOW);
+        ShowWindow(g_hBtnInputCancel, SW_SHOW);
+        SetFocus(g_hEditCustom);
+    } else if (g_hw_testing) {
         ShowWindow(g_hBtnChoose, SW_HIDE);
         ShowWindow(g_hBtnContinue, SW_HIDE);
         ShowWindow(g_hBtnDetails, SW_HIDE);
@@ -1387,8 +1943,11 @@ static void update_controls_visibility(void)
         ShowWindow(g_hBtnTestAgain, SW_HIDE);
         ShowWindow(g_hBtnQCancel, SW_HIDE);
         ShowWindow(g_hBtnCompress, SW_HIDE);
+        ShowWindow(g_hBtnPreview, SW_HIDE);
         ShowWindow(g_hBtnSkip, SW_SHOW);
         EnableWindow(g_hBtnSkip, g_hw_skipped ? FALSE : TRUE);
+    } else if (g_step == 2) {
+        encode_ui_update_controls();
     } else if (g_step == 1) {
         ShowWindow(g_hBtnChoose, SW_HIDE);
         ShowWindow(g_hBtnContinue, SW_HIDE);
@@ -1960,8 +2519,8 @@ static void quality_ui_back(HWND hWnd)
 
 static void quality_ui_compress(HWND hWnd)
 {
-    gb_message_box(hWnd, text(STR_QUALITY_PANEL), text(STR_QUALITY_M5_NOTE),
-                   MB_OK | MB_ICONINFORMATION);
+    if (!g_quality_has_result) return;
+    encode_ui_enter(hWnd);
 }
 
 static void quality_select_at(HWND hWnd, int x, int y)
@@ -2008,6 +2567,418 @@ static void quality_ui_reset(void)
     memset(&g_est, 0, sizeof(g_est));
     memset(&g_est_progress, 0, sizeof(g_est_progress));
     g_quality_selected = QUALITY_BALANCED;
+    encode_ui_reset();
+}
+
+static void encode_ui_reset(void)
+{
+    g_encode_gen++;
+    g_encode_cancel = 1;
+    g_encode_state = 0;
+    g_enc_options_ready = 0;
+    g_encode_output[0] = L'\0';
+    g_encode_detail[0] = L'\0';
+    g_encode_error_code = ENCODE_ERR_NONE;
+    g_encode_size = 0;
+    g_input_active = 0;
+    memset(&g_enc_opt, 0, sizeof(g_enc_opt));
+    memset(&g_encode_progress, 0, sizeof(g_encode_progress));
+}
+
+static void encode_ui_update_controls(void)
+{
+    int has_audio = g_info.audio_track_count > 0;
+    int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
+    int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
+    wchar_t buf[128];
+
+    ShowWindow(g_hBtnChoose, SW_HIDE);
+    ShowWindow(g_hBtnContinue, SW_HIDE);
+    ShowWindow(g_hBtnDetails, SW_HIDE);
+    ShowWindow(g_hBtnRetest, SW_HIDE);
+    ShowWindow(g_hBtnDepth, SW_HIDE);
+    ShowWindow(g_hBtnSkip, SW_HIDE);
+    ShowWindow(g_hBtnTestAgain, SW_HIDE);
+    ShowWindow(g_hBtnQCancel, SW_HIDE);
+    ShowWindow(g_hBtnCompress, SW_HIDE);
+    ShowWindow(g_hBtnPreview, SW_HIDE);
+
+    ShowWindow(g_hBtnBack, g_encode_state == 1 ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_hBtnStart, (g_encode_state == 0 || g_encode_state == 3) ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnECancel, g_encode_state == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hBtnShow, g_encode_state == 2 ? SW_SHOW : SW_HIDE);
+
+    SetWindowTextW(g_hBtnBack,
+                   text(g_encode_state == 2 ? STR_COMP_BACK_QUALITY : STR_COMP_BACK));
+    SetWindowTextW(g_hBtnStart,
+                   text(g_encode_state == 3 ? STR_COMP_TRY_AGAIN : STR_COMP_START));
+
+    if (g_encode_state == 0) {
+        ShowWindow(g_hBtnContMkv, SW_SHOW);
+        ShowWindow(g_hBtnContMp4, SW_SHOW);
+        ShowWindow(g_hBtnVcHevc, SW_SHOW);
+        ShowWindow(g_hBtnVcH264, SW_SHOW);
+        if (has_audio) {
+            ShowWindow(g_hBtnAudio, SW_SHOW);
+            SetWindowTextW(g_hBtnAudio, encode_audio_codec_label(g_enc_opt.audio_codec));
+        }
+        if (has_bitrate) {
+            ShowWindow(g_hBtnABitrate, SW_SHOW);
+            bitrate_button_text(buf, 128);
+            SetWindowTextW(g_hBtnABitrate, buf);
+            if (downmix_visible) {
+                ShowWindow(g_hBtnDownmix, SW_SHOW);
+                EnableWindow(g_hBtnDownmix,
+                             encode_audio_force_stereo(g_enc_opt.audio_codec) ? FALSE : TRUE);
+            }
+        }
+    }
+}
+
+static void encode_ui_enter(HWND hWnd)
+{
+    if (!g_has_info || !g_quality_has_result) return;
+
+    if (!g_enc_options_ready) {
+        encode_options_defaults(&g_enc_opt, &g_info);
+        g_enc_options_ready = 1;
+    }
+    if (g_info.audio_track_count <= 0) {
+        g_enc_opt.audio_codec = ENC_ACODEC_COPY;
+    } else if (!encode_audio_available(g_enc_opt.container, g_enc_opt.audio_codec) ||
+               (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
+                !encode_audio_copy_available(&g_info, g_enc_opt.container))) {
+        g_enc_opt.audio_codec = encode_default_audio(g_enc_opt.container);
+    }
+    encode_fix_bitrate(&g_enc_opt);
+
+    g_step = 2;
+    g_encode_state = 0;
+    g_encode_cancel = 0;
+    g_encode_output[0] = L'\0';
+    g_encode_detail[0] = L'\0';
+    g_encode_error_code = ENCODE_ERR_NONE;
+    g_encode_size = 0;
+    memset(&g_encode_progress, 0, sizeof(g_encode_progress));
+    set_status_text(text(STR_COMP_HEADING), 0);
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    SetFocus(g_hBtnStart);
+}
+
+static void encode_ui_audio_picked(int index, void *user)
+{
+    int codec, i = 0;
+    (void)user;
+    for (codec = 0; codec < ENC_ACODEC_COUNT; codec++) {
+        if (!encode_audio_available(g_enc_opt.container, codec)) continue;
+        if (codec == ENC_ACODEC_COPY &&
+            !encode_audio_copy_available(&g_info, g_enc_opt.container)) continue;
+        if (i == index) {
+            g_enc_opt.audio_codec = codec;
+            encode_fix_bitrate(&g_enc_opt);
+            if (encode_audio_force_stereo(codec)) g_enc_opt.downmix_stereo = 1;
+            update_controls_visibility();
+            InvalidateRect(g_hWnd, NULL, FALSE);
+            return;
+        }
+        i++;
+    }
+}
+
+static void encode_ui_bitrate_picked(int index, void *user)
+{
+    int ac3 = g_enc_opt.audio_codec == ENC_ACODEC_AC3 ||
+              g_enc_opt.audio_codec == ENC_ACODEC_EAC3;
+    (void)user;
+
+    if (ac3) {
+        if (index == 0) g_enc_opt.bitrate = ENC_ABITRATE_HIGH;
+        else PostMessageW(g_hWnd, WM_APP_OPEN_CUSTOM, 0, 0);
+    } else {
+        if (index >= 0 && index <= 2) {
+            g_enc_opt.bitrate = index;
+        } else if (index == 3) {
+            PostMessageW(g_hWnd, WM_APP_OPEN_CUSTOM, 0, 0);
+        }
+    }
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void encode_ui_open_audio_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[ENC_ACODEC_COUNT];
+    RECT anchor;
+    int count = 0, selected = 0, codec;
+
+    update_audio_dropdown_items();
+    for (codec = 0; codec < ENC_ACODEC_COUNT; codec++) {
+        if (!encode_audio_available(g_enc_opt.container, codec)) continue;
+        ptrs[count] = g_audio_items[count];
+        if (codec == g_enc_opt.audio_codec) selected = count;
+        count++;
+    }
+    GetWindowRect(g_hBtnAudio, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, count, selected,
+                     encode_ui_audio_picked, NULL);
+}
+
+static void encode_ui_open_bitrate_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[4];
+    RECT anchor;
+    int count, selected, i;
+    int ac3 = g_enc_opt.audio_codec == ENC_ACODEC_AC3 ||
+              g_enc_opt.audio_codec == ENC_ACODEC_EAC3;
+
+    update_bitrate_dropdown_items();
+    count = ac3 ? 2 : 4;
+    for (i = 0; i < count; i++) ptrs[i] = g_bitrate_items[i];
+    if (ac3) selected = (g_enc_opt.bitrate == ENC_ABITRATE_CUSTOM) ? 1 : 0;
+    else selected = (g_enc_opt.bitrate >= 0 && g_enc_opt.bitrate < 4)
+        ? g_enc_opt.bitrate : 1;
+
+    GetWindowRect(g_hBtnABitrate, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, count, selected,
+                     encode_ui_bitrate_picked, NULL);
+}
+
+static void encode_ui_open_custom(HWND hWnd)
+{
+    wchar_t buf[32];
+    if (g_encode_state != 0) return;
+    _snwprintf(buf, 32, L"%d", g_enc_opt.custom_kbps);
+    buf[31] = L'\0';
+    SetWindowTextW(g_hEditCustom, buf);
+    SendMessageW(g_hEditCustom, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
+    g_input_active = 1;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+
+static void encode_ui_close_custom(void)
+{
+    g_input_active = 0;
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void encode_ui_accept_custom(HWND hWnd)
+{
+    wchar_t buf[32];
+    wchar_t *end = NULL;
+    long value;
+    int min_kbps = encode_audio_min_kbps(g_enc_opt.audio_codec);
+    int max_kbps = ENC_BITRATE_MAX_KBPS;
+
+    GetWindowTextW(g_hEditCustom, buf, 32);
+    buf[31] = L'\0';
+    util_trim(buf);
+    value = wcstol(buf, &end, 10);
+    if (!buf[0] || !end || *end != L'\0' || value < min_kbps || value > max_kbps) {
+        gb_message_box(hWnd, text(STR_COMP_CUSTOM_TITLE),
+                       text(STR_COMP_CUSTOM_INVALID), MB_OK | MB_ICONWARNING);
+        SetFocus(g_hEditCustom);
+        return;
+    }
+    g_enc_opt.custom_kbps = (int)value;
+    g_enc_opt.bitrate = ENC_ABITRATE_CUSTOM;
+    g_input_active = 0;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    SetFocus(g_hBtnStart);
+}
+
+typedef struct {
+    HWND hwnd;
+    int gen;
+    SourceInfo src;
+    EncodeOptions opt;
+    int level;
+    int encoder;
+} EncodeJob;
+
+static void encode_progress_cb(const EncodeProgress *p, void *user)
+{
+    EncodeJob *job = (EncodeJob*)user;
+    EncodeProgressMsg *msg;
+    if (!p || !job) return;
+    msg = (EncodeProgressMsg*)malloc(sizeof(EncodeProgressMsg));
+    if (!msg) return;
+    msg->gen = job->gen;
+    msg->progress = *p;
+    if (!PostMessageW(job->hwnd, WM_APP_ENCODE_PROGRESS, 0, (LPARAM)msg)) free(msg);
+}
+
+static DWORD WINAPI encode_thread_proc(LPVOID param)
+{
+    EncodeJob *job = (EncodeJob*)param;
+    EncodeDoneMsg *msg;
+    EncodeError err = ENCODE_ERR_NONE;
+
+    msg = (EncodeDoneMsg*)calloc(1, sizeof(EncodeDoneMsg));
+    if (!msg) {
+        free(job);
+        return 0;
+    }
+    msg->gen = job->gen;
+    msg->result = encode_run(&job->src, job->encoder, job->level, &job->opt,
+                             encode_progress_cb, job, &g_encode_cancel,
+                             msg->path, UTIL_PATH_MAX, &msg->size,
+                             &err, msg->detail, 512);
+    msg->error_code = err;
+    if (!PostMessageW(job->hwnd, WM_APP_ENCODE_DONE, 0, (LPARAM)msg)) free(msg);
+    free(job);
+    return 0;
+}
+
+static void encode_ui_start(HWND hWnd)
+{
+    EncodeJob *job;
+    HANDLE thread;
+    wchar_t path[UTIL_PATH_MAX];
+    wchar_t msg_text[512];
+    int encoder;
+
+    if (!g_has_info || g_encode_state == 1) return;
+    encode_fix_bitrate(&g_enc_opt);
+
+    if (!encode_audio_available(g_enc_opt.container, g_enc_opt.audio_codec) ||
+        (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
+         !encode_audio_copy_available(&g_info, g_enc_opt.container))) {
+        gb_message_box(hWnd, text(STR_COMP_PANEL), text(STR_COMP_ERR_AUDIO),
+                       MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    if (g_enc_opt.container == ENC_CONT_MP4) {
+        int bitmap = encode_bitmap_subtitle_count(&g_info);
+        if (bitmap > 0) {
+            _snwprintf(msg_text, 512, text(STR_COMP_SUBS_DROP_CONFIRM), bitmap);
+            msg_text[511] = L'\0';
+            if (gb_message_box(hWnd, text(STR_COMP_SUBS_DROP_TITLE), msg_text,
+                               MB_YESNO | MB_ICONWARNING) != IDYES) {
+                return;
+            }
+        }
+    }
+
+    if (!encode_preview_output_path(&g_info, g_enc_opt.container,
+                                    path, UTIL_PATH_MAX)) {
+        gb_message_box(hWnd, text(STR_COMP_PANEL), text(STR_COMP_ERR_PATH),
+                       MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    encoder = g_quality_has_result ? g_est.encoder
+                                   : estimate_choose_encoder(&g_info, &g_hw_info);
+
+    g_encode_state = 1;
+    g_encode_gen++;
+    g_encode_cancel = 0;
+    memset(&g_encode_progress, 0, sizeof(g_encode_progress));
+    g_encode_output[0] = L'\0';
+    g_encode_detail[0] = L'\0';
+    g_encode_error_code = ENCODE_ERR_NONE;
+    g_encode_size = 0;
+    g_encode_start_tick = GetTickCount64();
+    set_status_id(STR_STATUS_ENCODING, 0);
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    SetFocus(g_hBtnECancel);
+
+    job = (EncodeJob*)calloc(1, sizeof(EncodeJob));
+    if (!job) {
+        g_encode_state = 3;
+        g_encode_error_code = ENCODE_ERR_OUT_OF_MEMORY;
+        set_status_id(STR_STATUS_ENCODE_FAILED, 1);
+        update_controls_visibility();
+        return;
+    }
+    job->hwnd = hWnd;
+    job->gen = g_encode_gen;
+    job->src = g_info;
+    job->opt = g_enc_opt;
+    job->level = g_quality_selected;
+    job->encoder = encoder;
+
+    thread = CreateThread(NULL, 0, encode_thread_proc, job, 0, NULL);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        free(job);
+        g_encode_state = 3;
+        g_encode_error_code = ENCODE_ERR_START;
+        set_status_id(STR_STATUS_ENCODE_FAILED, 1);
+        update_controls_visibility();
+    }
+}
+
+static void encode_ui_cancel(void)
+{
+    if (g_encode_state != 1) return;
+    g_encode_cancel = 1;
+    EnableWindow(g_hBtnECancel, FALSE);
+}
+
+static void encode_ui_back(HWND hWnd)
+{
+    if (g_encode_state == 1) return;
+    if (g_encode_state == 2) {
+        g_step = 1;
+        g_encode_state = 0;
+        update_controls_visibility();
+        InvalidateRect(hWnd, NULL, FALSE);
+        return;
+    }
+    if (g_encode_state == 3) {
+        g_encode_state = 0;
+        update_controls_visibility();
+        InvalidateRect(hWnd, NULL, FALSE);
+        return;
+    }
+    g_step = 1;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+
+static void encode_ui_on_done(HWND hWnd, EncodeDoneMsg *msg)
+{
+    if (!msg) return;
+    if (msg->gen != g_encode_gen) {
+        free(msg);
+        return;
+    }
+
+    if (msg->result == ENCODE_OK) {
+        g_encode_state = 2;
+        g_encode_size = msg->size;
+        wcsncpy(g_encode_output, msg->path, UTIL_PATH_MAX - 1);
+        g_encode_output[UTIL_PATH_MAX - 1] = L'\0';
+        set_status_id(STR_STATUS_ENCODED, 0);
+    } else if (msg->result == ENCODE_CANCELLED) {
+        g_encode_state = 0;
+        g_encode_error_code = ENCODE_ERR_NONE;
+        g_encode_detail[0] = L'\0';
+        set_status_id(STR_STATUS_ENCODE_CANCELLED, 0);
+        gb_message_box(hWnd, text(STR_COMP_PANEL), text(STR_COMP_CANCELED),
+                       MB_OK | MB_ICONINFORMATION);
+    } else {
+        g_encode_state = 3;
+        g_encode_error_code = (msg->result == ENCODE_VERIFY_FAILED)
+            ? ENCODE_ERR_VERIFY : msg->error_code;
+        wcsncpy(g_encode_detail, msg->detail, 511);
+        g_encode_detail[511] = L'\0';
+        set_status_id(STR_STATUS_ENCODE_FAILED, 1);
+    }
+
+    g_encode_cancel = 0;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    free(msg);
 }
 
 static void choose_file(HWND hWnd)
@@ -2097,6 +3068,50 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnPreview = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_PREVIEW),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 110, 38, hWnd, (HMENU)IDC_BTN_PREVIEW, inst, NULL);
+            g_hBtnContMkv = CreateWindowExW(0, L"BUTTON", text(STR_COMP_MKV),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 70, 28, hWnd, (HMENU)IDC_BTN_CONT_MKV, inst, NULL);
+            g_hBtnContMp4 = CreateWindowExW(0, L"BUTTON", text(STR_COMP_MP4),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 70, 28, hWnd, (HMENU)IDC_BTN_CONT_MP4, inst, NULL);
+            g_hBtnVcHevc = CreateWindowExW(0, L"BUTTON", text(STR_COMP_H265),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 150, 28, hWnd, (HMENU)IDC_BTN_VC_HEVC, inst, NULL);
+            g_hBtnVcH264 = CreateWindowExW(0, L"BUTTON", text(STR_COMP_H264),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 150, 28, hWnd, (HMENU)IDC_BTN_VC_H264, inst, NULL);
+            g_hBtnAudio = CreateWindowExW(0, L"BUTTON", text(STR_COMP_AUDIO_LABEL),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 170, 30, hWnd, (HMENU)IDC_BTN_AUDIO, inst, NULL);
+            g_hBtnABitrate = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 170, 30, hWnd, (HMENU)IDC_BTN_ABITRATE, inst, NULL);
+            g_hBtnDownmix = CreateWindowExW(0, L"BUTTON", text(STR_COMP_DOWNMIX),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 220, 26, hWnd, (HMENU)IDC_BTN_DOWNMIX, inst, NULL);
+            g_hBtnStart = CreateWindowExW(0, L"BUTTON", text(STR_COMP_START),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 180, 38, hWnd, (HMENU)IDC_BTN_START, inst, NULL);
+            g_hBtnECancel = CreateWindowExW(0, L"BUTTON", text(STR_COMP_CANCEL),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 170, 38, hWnd, (HMENU)IDC_BTN_ECANCEL, inst, NULL);
+            g_hBtnShow = CreateWindowExW(0, L"BUTTON", text(STR_COMP_OPEN_FOLDER),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 180, 38, hWnd, (HMENU)IDC_BTN_SHOW, inst, NULL);
+            g_hBtnInputOk = CreateWindowExW(0, L"BUTTON", text(STR_COMP_CUSTOM_OK),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 100, 32, hWnd, (HMENU)IDC_BTN_INPUT_OK, inst, NULL);
+            g_hBtnInputCancel = CreateWindowExW(0, L"BUTTON", text(STR_COMP_CANCEL),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 110, 32, hWnd, (HMENU)IDC_BTN_INPUT_CANCEL, inst, NULL);
+            g_hEditCustom = CreateWindowExW(0, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                0, 0, 220, 28, hWnd, (HMENU)IDC_EDIT_CUSTOM, inst, NULL);
+            SendMessageW(g_hEditCustom, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            SendMessageW(g_hEditCustom, EM_SETLIMITTEXT, 4, 0);
+            g_edit_old_proc = (WNDPROC)SetWindowLongPtrW(g_hEditCustom, GWLP_WNDPROC,
+                                                        (LONG_PTR)custom_edit_proc);
+            g_brushLightest = CreateSolidBrush(GB_LIGHTEST);
             g_hBtnMin = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 26, 24, hWnd, (HMENU)IDC_BTN_MIN, inst, NULL);
@@ -2115,6 +3130,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             track_button(g_hBtnQCancel);
             track_button(g_hBtnCompress);
             track_button(g_hBtnPreview);
+            track_button(g_hBtnContMkv);
+            track_button(g_hBtnContMp4);
+            track_button(g_hBtnVcHevc);
+            track_button(g_hBtnVcH264);
+            track_button(g_hBtnAudio);
+            track_button(g_hBtnABitrate);
+            track_button(g_hBtnDownmix);
+            track_button(g_hBtnStart);
+            track_button(g_hBtnECancel);
+            track_button(g_hBtnShow);
+            track_button(g_hBtnInputOk);
+            track_button(g_hBtnInputCancel);
             track_button(g_hBtnMin);
             track_button(g_hBtnClose);
 
@@ -2209,6 +3236,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             HDROP drop = (HDROP)wParam;
             wchar_t path[UTIL_PATH_MAX];
             path[0] = L'\0';
+            if (g_encode_state == 1) {
+                set_status_text(text(STR_COMP_BUSY), 1);
+                DragFinish(drop);
+                return 0;
+            }
+            if (g_input_active) encode_ui_close_custom();
             if (DragQueryFileW(drop, 0, path, UTIL_PATH_MAX) > 0) {
                 if (g_hw_testing) {
                     wcsncpy(g_hw_pending_path, path, UTIL_PATH_MAX - 1);
@@ -2258,17 +3291,45 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDC_BTN_BACK:
                 case IDC_BTN_TESTAGAIN:
                 case IDC_BTN_PREVIEW:
+                case IDC_BTN_INPUT_CANCEL:
                     role = GB_ROLE_PUSH;
                     break;
                 case IDC_BTN_CONTINUE:
                 case IDC_BTN_COMPRESS:
+                case IDC_BTN_START:
+                case IDC_BTN_SHOW:
+                case IDC_BTN_INPUT_OK:
                     role = GB_ROLE_PRIMARY;
                     break;
                 case IDC_BTN_QCANCEL:
+                case IDC_BTN_ECANCEL:
                     role = GB_ROLE_DANGER;
                     break;
                 case IDC_BTN_DEPTH:
+                case IDC_BTN_AUDIO:
+                case IDC_BTN_ABITRATE:
                     role = GB_ROLE_DROP;
+                    break;
+                case IDC_BTN_CONT_MKV:
+                    role = GB_ROLE_CHIP;
+                    checked = (g_enc_opt.container == ENC_CONT_MKV);
+                    break;
+                case IDC_BTN_CONT_MP4:
+                    role = GB_ROLE_CHIP;
+                    checked = (g_enc_opt.container == ENC_CONT_MP4);
+                    break;
+                case IDC_BTN_VC_HEVC:
+                    role = GB_ROLE_CHIP;
+                    checked = (g_enc_opt.video_codec == ENC_VCODEC_HEVC);
+                    break;
+                case IDC_BTN_VC_H264:
+                    role = GB_ROLE_CHIP;
+                    checked = (g_enc_opt.video_codec == ENC_VCODEC_H264);
+                    break;
+                case IDC_BTN_DOWNMIX:
+                    role = GB_ROLE_CHECK;
+                    checked = g_enc_opt.downmix_stereo ||
+                              encode_audio_force_stereo(g_enc_opt.audio_codec);
                     break;
                 case IDC_BTN_MIN:
                     role = GB_ROLE_TITLE;
@@ -2290,10 +3351,24 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     dis->CtlID == IDC_BTN_TESTAGAIN ||
                     dis->CtlID == IDC_BTN_PREVIEW ||
                     dis->CtlID == IDC_BTN_QCANCEL ||
-                    dis->CtlID == IDC_BTN_COMPRESS) {
+                    dis->CtlID == IDC_BTN_COMPRESS ||
+                    dis->CtlID == IDC_BTN_CONT_MKV ||
+                    dis->CtlID == IDC_BTN_CONT_MP4 ||
+                    dis->CtlID == IDC_BTN_VC_HEVC ||
+                    dis->CtlID == IDC_BTN_VC_H264 ||
+                    dis->CtlID == IDC_BTN_AUDIO ||
+                    dis->CtlID == IDC_BTN_ABITRATE ||
+                    dis->CtlID == IDC_BTN_DOWNMIX ||
+                    dis->CtlID == IDC_BTN_ECANCEL ||
+                    dis->CtlID == IDC_BTN_INPUT_CANCEL) {
                     font = g_fontSmall;
                 }
-                if (dis->CtlID == IDC_BTN_COMPRESS) font = g_fontBold;
+                if (dis->CtlID == IDC_BTN_COMPRESS ||
+                    dis->CtlID == IDC_BTN_START ||
+                    dis->CtlID == IDC_BTN_SHOW ||
+                    dis->CtlID == IDC_BTN_INPUT_OK) {
+                    font = g_fontBold;
+                }
                 gb_draw_control(dis, font, role, checked, tracked_hover(dis->hwndItem));
                 return TRUE;
             }
@@ -2322,7 +3397,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                     return 0;
                 case IDC_BTN_BACK:
-                    quality_ui_back(hWnd);
+                    if (g_step == 2) encode_ui_back(hWnd);
+                    else quality_ui_back(hWnd);
                     return 0;
                 case IDC_BTN_TESTAGAIN:
                     quality_ui_test_again(hWnd);
@@ -2335,6 +3411,69 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 case IDC_BTN_COMPRESS:
                     quality_ui_compress(hWnd);
+                    return 0;
+                case IDC_BTN_CONT_MKV:
+                case IDC_BTN_CONT_MP4: {
+                    int new_container = (id == IDC_BTN_CONT_MP4)
+                        ? ENC_CONT_MP4 : ENC_CONT_MKV;
+                    if (g_encode_state != 0 || g_step != 2) return 0;
+                    g_enc_opt.container = new_container;
+                    if (g_info.audio_track_count <= 0) {
+                        g_enc_opt.audio_codec = ENC_ACODEC_COPY;
+                    } else if (!encode_audio_available(new_container,
+                                                      g_enc_opt.audio_codec) ||
+                               (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
+                                !encode_audio_copy_available(&g_info,
+                                                             new_container))) {
+                        g_enc_opt.audio_codec = encode_default_audio(new_container);
+                    }
+                    encode_fix_bitrate(&g_enc_opt);
+                    update_controls_visibility();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+                case IDC_BTN_VC_HEVC:
+                case IDC_BTN_VC_H264:
+                    if (g_encode_state != 0 || g_step != 2) return 0;
+                    g_enc_opt.video_codec = (id == IDC_BTN_VC_H264)
+                        ? ENC_VCODEC_H264 : ENC_VCODEC_HEVC;
+                    update_controls_visibility();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                case IDC_BTN_AUDIO:
+                    if (g_encode_state == 0 && g_step == 2 &&
+                        g_info.audio_track_count > 0) {
+                        encode_ui_open_audio_dropdown(hWnd);
+                    }
+                    return 0;
+                case IDC_BTN_ABITRATE:
+                    if (g_encode_state == 0 && g_step == 2 &&
+                        encode_audio_has_bitrate(g_enc_opt.audio_codec)) {
+                        encode_ui_open_bitrate_dropdown(hWnd);
+                    }
+                    return 0;
+                case IDC_BTN_DOWNMIX:
+                    if (g_encode_state == 0 && g_step == 2 &&
+                        !encode_audio_force_stereo(g_enc_opt.audio_codec)) {
+                        g_enc_opt.downmix_stereo = !g_enc_opt.downmix_stereo;
+                        update_controls_visibility();
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    return 0;
+                case IDC_BTN_START:
+                    encode_ui_start(hWnd);
+                    return 0;
+                case IDC_BTN_ECANCEL:
+                    encode_ui_cancel();
+                    return 0;
+                case IDC_BTN_SHOW:
+                    if (g_encode_state == 2) encode_open_folder(g_encode_output);
+                    return 0;
+                case IDC_BTN_INPUT_OK:
+                    encode_ui_accept_custom(hWnd);
+                    return 0;
+                case IDC_BTN_INPUT_CANCEL:
+                    encode_ui_close_custom();
                     return 0;
                 case IDC_BTN_DETAILS:
                     if (g_has_info) {
@@ -2365,7 +3504,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_KEYDOWN:
             if (wParam == VK_ESCAPE) {
-                if (g_step == 1) {
+                if (g_input_active) {
+                    encode_ui_close_custom();
+                } else if (g_step == 2) {
+                    if (g_encode_state == 1) encode_ui_cancel();
+                    else encode_ui_back(hWnd);
+                } else if (g_step == 1) {
                     if (g_quality_testing) quality_ui_cancel();
                     else quality_ui_back(hWnd);
                 } else if (g_show_details) {
@@ -2436,7 +3580,45 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        case WM_APP_ENCODE_PROGRESS: {
+            EncodeProgressMsg *p = (EncodeProgressMsg*)lParam;
+            if (p) {
+                if (p->gen == g_encode_gen && g_encode_state == 1) {
+                    g_encode_progress = p->progress;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                free(p);
+            }
+            return 0;
+        }
+
+        case WM_APP_ENCODE_DONE: {
+            EncodeDoneMsg *m = (EncodeDoneMsg*)lParam;
+            encode_ui_on_done(hWnd, m);
+            return 0;
+        }
+
+        case WM_APP_OPEN_CUSTOM:
+            if (g_step == 2 && g_encode_state == 0) encode_ui_open_custom(hWnd);
+            return 0;
+
+        case WM_CTLCOLOREDIT: {
+            HDC dc = (HDC)wParam;
+            SetTextColor(dc, GB_DARKEST);
+            SetBkColor(dc, GB_LIGHTEST);
+            return (LRESULT)(g_brushLightest ? g_brushLightest
+                                             : GetStockObject(WHITE_BRUSH));
+        }
+
         case WM_CLOSE:
+            if (g_encode_state == 1) {
+                if (gb_message_box(hWnd, text(STR_COMP_CLOSE_TITLE),
+                                   text(STR_COMP_CLOSE_TEXT),
+                                   MB_YESNO | MB_ICONWARNING) != IDYES) {
+                    return 0;
+                }
+                g_encode_cancel = 1;
+            }
             if (g_hw_testing) g_hw_cancel = 1;
             if (g_quality_testing) g_est_cancel = 1;
             DestroyWindow(hWnd);
@@ -2445,7 +3627,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_DESTROY:
             if (g_hw_testing) g_hw_cancel = 1;
             if (g_quality_testing) g_est_cancel = 1;
+            if (g_encode_state == 1) g_encode_cancel = 1;
             quality_cleanup_previews();
+            if (g_brushLightest) {
+                DeleteObject(g_brushLightest);
+                g_brushLightest = NULL;
+            }
             destroy_fonts();
             g_hWnd = NULL;
             PostQuitMessage(0);

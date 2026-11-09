@@ -183,7 +183,31 @@ static int capture_append(char **buf, size_t *cap, size_t *len, const char *src,
     return 1;
 }
 
-static void capture_drain(HANDLE pipe, char **buf, size_t *cap, size_t *len, int *oom)
+static void line_feed(char *line, size_t *line_len, const char *src, DWORD n,
+                      UtilLineCallback cb, void *user)
+{
+    DWORD i;
+    for (i = 0; i < n; i++) {
+        char c = src[i];
+        if (c == '\n') {
+            line[*line_len] = '\0';
+            if (cb) cb(line, *line_len, user);
+            *line_len = 0;
+        } else if (c != '\r') {
+            if (*line_len < 4095) {
+                line[(*line_len)++] = c;
+            } else {
+                line[*line_len] = '\0';
+                if (cb) cb(line, *line_len, user);
+                *line_len = 0;
+            }
+        }
+    }
+}
+
+static void capture_drain(HANDLE pipe, char **buf, size_t *cap, size_t *len, int *oom,
+                          char *line, size_t *line_len,
+                          UtilLineCallback cb, void *user)
 {
     char chunk[8192];
     DWORD avail = 0;
@@ -192,13 +216,15 @@ static void capture_drain(HANDLE pipe, char **buf, size_t *cap, size_t *len, int
         DWORD got = 0;
         if (!ReadFile(pipe, chunk, want, &got, NULL) || got == 0) break;
         if (!capture_append(buf, cap, len, chunk, got)) { *oom = 1; return; }
+        line_feed(line, line_len, chunk, got, cb, user);
     }
 }
 
-UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
-                               volatile int *cancel,
-                               char **out, size_t *out_len,
-                               DWORD *exit_code)
+UtilRunResult util_run_lines(const wchar_t *cmd, DWORD timeout_ms,
+                             volatile int *cancel,
+                             UtilLineCallback cb, void *user,
+                             char **out, size_t *out_len,
+                             DWORD *exit_code)
 {
     HANDLE rd = NULL, wr = NULL, job = NULL;
     SECURITY_ATTRIBUTES sa;
@@ -206,7 +232,8 @@ UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
     PROCESS_INFORMATION pi;
     wchar_t *cmd_copy = NULL;
     char *buf = NULL;
-    size_t cap = 65536, len = 0;
+    char line[4096];
+    size_t cap = 65536, len = 0, line_len = 0;
     int oom = 0, timed_out = 0, was_cancelled = 0;
     DWORD code = 0;
     DWORD started;
@@ -264,6 +291,7 @@ UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
         goto stop_process;
     }
     buf[0] = '\0';
+    line[0] = '\0';
 
     started = GetTickCount();
     for (;;) {
@@ -273,18 +301,23 @@ UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
             break;
         }
         if (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) && avail > 0) {
-            capture_drain(rd, &buf, &cap, &len, &oom);
+            capture_drain(rd, &buf, &cap, &len, &oom, line, &line_len, cb, user);
             if (oom) break;
             continue;
         }
         if (WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0) {
-            capture_drain(rd, &buf, &cap, &len, &oom);
+            capture_drain(rd, &buf, &cap, &len, &oom, line, &line_len, cb, user);
             break;
         }
         if (timeout_ms != 0 && GetTickCount() - started > timeout_ms) {
             timed_out = 1;
             break;
         }
+    }
+    if (line_len > 0 && cb) {
+        line[line_len] = '\0';
+        cb(line, line_len, user);
+        line_len = 0;
     }
 
 stop_process:
@@ -315,6 +348,15 @@ cleanup:
     *out_len = len;
     if (exit_code) *exit_code = code;
     return UTIL_RUN_OK;
+}
+
+UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
+                               volatile int *cancel,
+                               char **out, size_t *out_len,
+                               DWORD *exit_code)
+{
+    return util_run_lines(cmd, timeout_ms, cancel, NULL, NULL,
+                          out, out_len, exit_code);
 }
 
 void util_format_bytes(long long bytes, wchar_t *out, size_t cap)

@@ -3,6 +3,7 @@
 #include "hw.h"
 #include "presets.h"
 #include "estimate.h"
+#include "encode.h"
 #include "strings.h"
 #include "util.h"
 
@@ -372,6 +373,181 @@ static void test_estimates(void)
     CHECK(wcsstr(cmd, L"-ss 3.000") != NULL, "sample command seeks");
 }
 
+static void test_encode_options(void)
+{
+    SourceInfo src;
+    EncodeOptions opt;
+    wchar_t args[1024];
+    wchar_t cmd[16384];
+    wchar_t out[UTIL_PATH_MAX];
+    EncodeError err = ENCODE_ERR_NONE;
+    HwInfo hw;
+
+    memset(&src, 0, sizeof(src));
+    src.duration = 60.0;
+    src.coded_width = 1920;
+    src.coded_height = 1080;
+    src.bit_depth = 8;
+    src.audio_track_count = 3;
+    src.audio_tracks_stored = 3;
+    wcscpy(src.audio_tracks[0].codec, L"opus");
+    src.audio_tracks[0].channels = 2;
+    src.audio_tracks[0].bitrate = 48000;
+    wcscpy(src.audio_tracks[1].codec, L"aac");
+    src.audio_tracks[1].channels = 6;
+    src.audio_tracks[1].bitrate = 128000;
+    wcscpy(src.audio_tracks[2].codec, L"mp3");
+    src.audio_tracks[2].channels = 2;
+    src.audio_tracks[2].bitrate = 24000;
+    src.subtitle_track_count = 2;
+    src.subtitle_tracks_stored = 2;
+    wcscpy(src.subtitle_tracks[0].codec, L"subrip");
+    wcscpy(src.subtitle_tracks[1].codec, L"hdmv_pgs_subtitle");
+    wcscpy(src.path, L"C:\\videos\\clip.mp4");
+    wcscpy(src.file_name, L"clip.mp4");
+
+    CHECK(encode_audio_available(ENC_CONT_MKV, ENC_ACODEC_OPUS), "MKV allows Opus");
+    CHECK(encode_audio_available(ENC_CONT_MKV, ENC_ACODEC_FLAC), "MKV allows FLAC");
+    CHECK(encode_audio_available(ENC_CONT_MKV, ENC_ACODEC_VORBIS), "MKV allows Vorbis");
+    CHECK(encode_audio_available(ENC_CONT_MP4, ENC_ACODEC_AAC), "MP4 allows AAC");
+    CHECK(!encode_audio_available(ENC_CONT_MP4, ENC_ACODEC_OPUS), "MP4 hides Opus");
+    CHECK(!encode_audio_available(ENC_CONT_MP4, ENC_ACODEC_FLAC), "MP4 hides FLAC");
+    CHECK(encode_audio_copy_available(&src, ENC_CONT_MKV), "MKV can copy any audio");
+    CHECK(!encode_audio_copy_available(&src, ENC_CONT_MP4), "MP4 rejects copy of Opus source");
+    {
+        SourceInfo aac_src = src;
+        aac_src.audio_track_count = 1;
+        aac_src.audio_tracks_stored = 1;
+        wcscpy(aac_src.audio_tracks[0].codec, L"aac");
+        CHECK(encode_audio_copy_available(&aac_src, ENC_CONT_MP4),
+              "MP4 allows copy of AAC source");
+    }
+    CHECK(encode_default_audio(ENC_CONT_MKV) == ENC_ACODEC_OPUS, "MKV defaults to Opus");
+    CHECK(encode_default_audio(ENC_CONT_MP4) == ENC_ACODEC_AAC, "MP4 defaults to AAC");
+
+    encode_options_defaults(&opt, &src);
+    CHECK(opt.container == ENC_CONT_MKV, "default container is MKV");
+    CHECK(opt.video_codec == ENC_VCODEC_HEVC, "default video is H.265");
+    CHECK(opt.audio_codec == ENC_ACODEC_OPUS, "default audio is Opus");
+    CHECK(opt.bitrate == ENC_ABITRATE_MUSIC, "default bitrate is Music");
+    CHECK(!encode_audio_has_bitrate(ENC_ACODEC_COPY), "copy has no bitrate");
+    CHECK(!encode_audio_has_bitrate(ENC_ACODEC_FLAC), "FLAC has no bitrate");
+    CHECK(encode_audio_min_kbps(ENC_ACODEC_AC3) == 64, "AC-3 minimum is 64k");
+    CHECK(encode_audio_force_stereo(ENC_ACODEC_MP3), "MP3 forces stereo");
+    opt.audio_codec = ENC_ACODEC_AC3;
+    opt.bitrate = ENC_ABITRATE_VOICE;
+    encode_fix_bitrate(&opt);
+    CHECK(opt.bitrate == ENC_ABITRATE_HIGH, "AC-3 clamps Voice to High");
+    opt.bitrate = ENC_ABITRATE_CUSTOM;
+    opt.custom_kbps = 48;
+    encode_fix_bitrate(&opt);
+    CHECK(opt.bitrate == ENC_ABITRATE_HIGH, "AC-3 clamps low custom to High");
+    opt.bitrate = ENC_ABITRATE_CUSTOM;
+    opt.custom_kbps = 96;
+    encode_fix_bitrate(&opt);
+    CHECK(opt.bitrate == ENC_ABITRATE_CUSTOM, "AC-3 keeps valid custom bitrate");
+    CHECK(encode_subtitle_is_text(L"subrip"), "SRT is text");
+    CHECK(encode_subtitle_is_text(L"mov_text"), "mov_text is text");
+    CHECK(!encode_subtitle_is_text(L"hdmv_pgs_subtitle"), "PGS is bitmap");
+    CHECK(encode_text_subtitle_count(&src) == 1, "one text subtitle");
+    CHECK(encode_bitmap_subtitle_count(&src) == 1, "one bitmap subtitle");
+
+    opt.audio_codec = ENC_ACODEC_OPUS;
+    opt.bitrate = ENC_ABITRATE_MUSIC;
+    CHECK(encode_bitrate_kbps(&opt) == 36, "Music is 36k");
+    CHECK(!encode_audio_track_copies(&src, &opt, 0), "48k Opus source is re-encoded at 36k target");
+    CHECK(!encode_audio_track_copies(&src, &opt, 1), "128k AAC source is re-encoded");
+    CHECK(encode_audio_track_copies(&src, &opt, 2), "24k MP3 source is copied");
+    CHECK(encode_has_multichannel(&src), "source has multichannel audio");
+    CHECK(encode_audio_downmix_track(&src, &opt, 1), "5.1 track is downmixed");
+    CHECK(encode_any_downmix(&src, &opt), "downmix is proposed for an encoded 5.1 track");
+    src.audio_tracks[1].bitrate = 32000;
+    CHECK(encode_audio_track_copies(&src, &opt, 1), "low-bitrate 5.1 track is copied");
+    CHECK(!encode_any_downmix(&src, &opt), "copied 5.1 track needs no downmix");
+    src.audio_tracks[1].bitrate = 128000;
+    opt.downmix_stereo = 0;
+    CHECK(!encode_audio_downmix_track(&src, &opt, 1), "downmix can be disabled");
+    opt.audio_codec = ENC_ACODEC_MP3;
+    CHECK(encode_audio_downmix_track(&src, &opt, 1), "MP3 always downmixes");
+
+    CHECK(encode_preview_output_path(&src, ENC_CONT_MKV, out, UTIL_PATH_MAX) == 1,
+          "preview output path builds");
+    CHECK(wcsstr(out, L"Compressed") != NULL, "preview path uses Compressed folder");
+    CHECK(wcsstr(out, L"clip (compressed).mkv") != NULL, "preview path keeps base name");
+
+    hw_info_init(&hw);
+    hw.profile = HW_PROFILE_BALANCED;
+    hw.recommended = HW_ENC_AMF;
+    hw.best8 = HW_ENC_AMF;
+    hw.enc_ok8[HW_ENC_AMF] = 1;
+    hw.speed8_median[HW_ENC_AMF] = 10.0;
+
+    opt.container = ENC_CONT_MKV;
+    opt.video_codec = ENC_VCODEC_HEVC;
+    opt.audio_codec = ENC_ACODEC_OPUS;
+    opt.bitrate = ENC_ABITRATE_MUSIC;
+    opt.downmix_stereo = 1;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "MKV command builds");
+    CHECK(wcsstr(cmd, L"-map 0:v:0") != NULL, "command maps video explicitly");
+    CHECK(wcsstr(cmd, L"-map 0:a?") != NULL, "command maps all audio");
+    CHECK(wcsstr(cmd, L"-map 0:s?") != NULL, "command maps all subtitles");
+    CHECK(wcsstr(cmd, L"-c:s copy") != NULL, "MKV copies subtitles");
+    CHECK(wcsstr(cmd, L"-c:a libopus") != NULL, "Opus encoder is used");
+    CHECK(wcsstr(cmd, L"-c:a:2 copy") != NULL, "small audio track overrides to copy");
+    CHECK(wcsstr(cmd, L"-ac:a:1 2") != NULL, "5.1 track receives stereo downmix");
+    CHECK(wcsstr(cmd, L"-f matroska") != NULL, "MKV muxer is used");
+    CHECK(wcsstr(cmd, L"-progress pipe:1") != NULL, "command uses progress pipe");
+
+    opt.container = ENC_CONT_MP4;
+    opt.audio_codec = ENC_ACODEC_AAC;
+    opt.bitrate = ENC_ABITRATE_HIGH;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mp4",
+                               cmd, 16384, &err) == 1, "MP4 command builds");
+    CHECK(wcsstr(cmd, L"-map 0:s:0") != NULL, "MP4 maps the text subtitle only");
+    CHECK(wcsstr(cmd, L"-c:s mov_text") != NULL, "MP4 converts text subtitles");
+    CHECK(wcsstr(cmd, L"hdmv_pgs") == NULL, "MP4 command never maps PGS by codec");
+    CHECK(wcsstr(cmd, L"-tag:v hvc1") != NULL, "MP4 H.265 uses hvc1 tag");
+    CHECK(wcsstr(cmd, L"-f mp4") != NULL, "MP4 muxer is used");
+
+    opt.audio_codec = ENC_ACODEC_OPUS;
+    err = ENCODE_ERR_NONE;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip.mp4",
+                               cmd, 16384, &err) == 0, "MP4 rejects Opus");
+    CHECK(err == ENCODE_ERR_AUDIO, "MP4 rejection reports audio error");
+
+    opt.audio_codec = ENC_ACODEC_COPY;
+    err = ENCODE_ERR_NONE;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip.mp4",
+                               cmd, 16384, &err) == 0, "MP4 rejects copy of Opus source");
+    CHECK(err == ENCODE_ERR_AUDIO, "MP4 copy rejection reports audio error");
+
+    src.is_hdr = 1;
+    src.bit_depth = 10;
+    wcscpy(src.color_primaries, L"bt2020");
+    wcscpy(src.color_transfer, L"smpte2084");
+    wcscpy(src.color_space, L"bt2020nc");
+    opt.container = ENC_CONT_MP4;
+    opt.video_codec = ENC_VCODEC_H264;
+    opt.audio_codec = ENC_ACODEC_AAC;
+    opt.bitrate = ENC_ABITRATE_HIGH;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip.mp4",
+                               cmd, 16384, &err) == 1, "HDR H.264 command builds");
+    CHECK(wcsstr(cmd, L"-c:v libx264") != NULL, "H.264 uses x264");
+    CHECK(wcsstr(cmd, L"zscale") != NULL, "HDR H.264 tone-maps");
+    CHECK(wcsstr(cmd, L"-color_primaries bt709") != NULL, "HDR H.264 tags BT.709");
+    CHECK(presets_video_args_ex(&src, HW_ENC_AMF, QUALITY_BALANCED,
+                                PRESETS_VIDEO_H264, args, 1024) == 1,
+          "H.264 preset args build");
+    CHECK(wcsstr(args, L"libx264") != NULL, "preset uses libx264");
+    CHECK(wcsstr(args, L"crf 24") != NULL, "Balanced H.264 uses CRF 24");
+}
+
 static void test_strings_and_utils(void)
 {
     wchar_t buf[128];
@@ -431,6 +607,7 @@ int main(void)
     test_no_video_and_bad_json();
     test_hw_profiles();
     test_estimates();
+    test_encode_options();
     test_strings_and_utils();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

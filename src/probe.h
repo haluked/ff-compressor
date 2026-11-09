@@ -16,6 +16,22 @@ typedef enum {
     PROBE_ERR_OUT_OF_MEMORY
 } ProbeError;
 
+#define PROBE_MAX_AUDIO_TRACKS 32
+#define PROBE_MAX_SUBTITLE_TRACKS 64
+
+typedef struct {
+    wchar_t codec[64];
+    wchar_t language[32];
+    int channels;
+    int sample_rate;
+    long long bitrate;
+} AudioTrackInfo;
+
+typedef struct {
+    wchar_t codec[64];
+    wchar_t language[32];
+} SubtitleTrackInfo;
+
 typedef struct {
     wchar_t path[UTIL_PATH_MAX];
     wchar_t file_name[256];
@@ -63,6 +79,11 @@ typedef struct {
     int video_track_count;
     int audio_track_count;
     int subtitle_track_count;
+
+    AudioTrackInfo audio_tracks[PROBE_MAX_AUDIO_TRACKS];
+    int audio_tracks_stored;
+    SubtitleTrackInfo subtitle_tracks[PROBE_MAX_SUBTITLE_TRACKS];
+    int subtitle_tracks_stored;
 
     wchar_t audio_codec[64];
     wchar_t audio_codec_long[128];

@@ -4,10 +4,11 @@ A small, native Windows video compressor built in C with a Game Boy-inspired
 interface. It uses a portable FFmpeg build for analysis and encoding; the
 application itself has no Python, .NET, Electron or Qt runtime.
 
-**Status:** M4 (analysis, hardware test, sample-based quality estimates, SSIM
-and frame preview) is implemented. Compression arrives in M5–M6.
+**Status:** M5 (analysis, hardware test, quality estimates, SSIM/preview and
+full compression) is implemented. M6 covers final validation and release
+polish.
 
-## What works in M1–M4
+## What works in M1–M5
 
 - Choose a video with the file picker or drag and drop it onto the window.
 - Read it with `ffprobe` in a background worker.
@@ -68,9 +69,37 @@ and frame preview) is implemented. Compression arrives in M5–M6.
 - NVENC/QSV are tested at runtime on the user's machine. On the AMD-only
   development PC they are marked `untested_on_hardware`; a failing GPU encoder
   falls back to CPU x265 with a clear status message.
+- Compression step: MKV is the default container; MP4 is selectable. H.265 is
+  the default video codec and uses the tested hardware encoder with CPU x265
+  fallback. H.264 is always CPU x264 for maximum compatibility. HDR sources
+  encoded as H.264 are tone-mapped to SDR and tagged BT.709.
+- Audio choices are filtered by container and kept in the requested order:
+  Copy, Opus (default), AAC, MP3, FLAC, AC-3, E-AC-3, Vorbis. MP4 hides Opus,
+  FLAC and Vorbis. Bitrates are Voice 24k / Music 36k / High 64k / Custom, with
+  no bitrate for Copy or FLAC. A custom value can be typed directly (16–512
+  kbps; 64 kbps minimum for AC-3/E-AC-3). The Opus compatibility note stays
+  visible for MKV.
+- All audio tracks are kept. If a track's source bitrate is already below the
+  selected target, that track is copied instead of re-encoded. Multichannel
+  tracks that are being re-encoded are proposed for stereo downmix (on by
+  default; MP3/AC-3/E-AC-3 always use stereo). Copy and FLAC keep their
+  channels.
+- Subtitles: MKV copies every subtitle track as-is. MP4 converts text tracks to
+  `mov_text`; bitmap tracks (PGS/DVD/DVB) cannot be stored in MP4, so the app
+  shows how many will be dropped and asks for confirmation before starting.
+- Output goes to a `Compressed` folder next to the source. The name is
+  `<name> (compressed).<ext>` with a numeric suffix if it already exists. The
+  original file is never written to or overwritten. FFmpeg writes a `.partial`
+  file first; it is renamed only after a successful encode.
+- After encoding, `ffprobe` verifies the output: video and duration exist, the
+  display resolution matches, and the audio/subtitle track counts match the
+  plan. A failed verification deletes the partial output and reports an error.
+- The progress view shows percentage, elapsed time, speed and the quality-step
+  time estimate. `CANCEL` stops FFmpeg and deletes the partial file.
+- Explicit stream maps are used (`-map 0:v:0`, all audio, planned subtitles),
+  with metadata and chapters copied and data streams dropped.
 
-The second step is active; the third (full compression) is intentionally a
-placeholder until M5.
+The third step is active. M6 remains for final validation and release polish.
 
 ## Requirements
 
@@ -128,6 +157,26 @@ The capability-test settings are fixed in `src/hw.c` and logged verbatim.
 
 They are generated with FFmpeg's `testsrc2` and `sine` sources; no third-party
 media is included.
+
+## M5 encode verification
+
+`tests\encode_check.c` runs the same `encode_run()` path as the UI and probes the
+result. The M5 matrix covered:
+
+- MKV and MP4 output, with H.265 and H.264.
+- Audio Copy, Opus, AAC, MP3, FLAC, AC-3, E-AC-3 and Vorbis, including the
+  MP4 container filter.
+- The "source below target → copy" rule (24k source vs 36k target), multiple
+  audio tracks, and a 5.1 source with stereo downmix.
+- Text subtitle copy in MKV and conversion to `mov_text` in MP4.
+- HDR10 to H.265 (10-bit/HDR preserved) and HDR10 to H.264 (BT.709 tone-map).
+- VFR, anamorphic, rotated, 1080p and 4K sources.
+- Repeated encodes (numeric suffix, no overwrite) and cancellation (partial
+  file removed).
+
+Real 4K HDR10 HEVC was re-encoded to a 10-bit HEVC output with BT.2020/PQ tags
+intact; real 1080p HDR10 was also written to MP4 with `hvc1`. The current app
+build is **353 KB**, and the core suite passes **493 tests**.
 
 ## Design
 

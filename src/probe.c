@@ -160,9 +160,28 @@ ProbeError probe_parse_json(const char *json, SourceInfo *out)
                 out->video_track_count++;
                 if (!video && !attached_pic) video = s;
             } else if (strcmp(t, "audio") == 0) {
+                if (out->audio_tracks_stored < PROBE_MAX_AUDIO_TRACKS) {
+                    AudioTrackInfo *at = &out->audio_tracks[out->audio_tracks_stored++];
+                    cJSON *tags = obj(s, "tags");
+                    get_str(s, "codec_name", at->codec, 64);
+                    at->channels = get_int(s, "channels");
+                    at->sample_rate = get_int(s, "sample_rate");
+                    at->bitrate = get_ll(s, "bit_rate");
+                    if (tags && cJSON_IsObject(tags)) {
+                        get_str(tags, "language", at->language, 32);
+                    }
+                }
                 out->audio_track_count++;
                 if (!audio) audio = s;
             } else if (strcmp(t, "subtitle") == 0) {
+                if (out->subtitle_tracks_stored < PROBE_MAX_SUBTITLE_TRACKS) {
+                    SubtitleTrackInfo *st = &out->subtitle_tracks[out->subtitle_tracks_stored++];
+                    cJSON *tags = obj(s, "tags");
+                    get_str(s, "codec_name", st->codec, 64);
+                    if (tags && cJSON_IsObject(tags)) {
+                        get_str(tags, "language", st->language, 32);
+                    }
+                }
                 out->subtitle_track_count++;
             }
         }

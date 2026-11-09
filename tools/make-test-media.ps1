@@ -119,6 +119,39 @@ Run-Ffmpeg @(
     (Join-Path $Out "phone_4k_60mbps_20s.mp4")
 )
 
+# 10. Short audio clips for the "copy if source is already smaller" rule.
+Run-Ffmpeg @(
+    "-i", (Join-Path $Out "h264_1080p_20s.mp4"), "-t", "5",
+    "-c:v", "copy", "-c:a", "aac", "-b:a", "24k",
+    "-movflags", "+faststart", (Join-Path $Out "low_audio_24k.mp4")
+)
+Run-Ffmpeg @(
+    "-i", (Join-Path $Out "h264_1080p_20s.mp4"), "-t", "5",
+    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+    "-movflags", "+faststart", (Join-Path $Out "audio_128k_5s.mp4")
+)
+
+# 11. 5.1 audio to exercise downmix planning.
+Run-Ffmpeg @(
+    "-i", (Join-Path $Out "h264_1080p_20s.mp4"),
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+    "-map", "0:v:0", "-map", "1:a", "-t", "5",
+    "-c:v", "copy", "-c:a", "aac", "-ac", "6", "-b:a", "384k",
+    (Join-Path $Out "multichannel_5s.mkv")
+)
+
+# 12. Two audio tracks to verify all tracks are kept.
+Run-Ffmpeg @(
+    "-i", (Join-Path $Out "h264_1080p_20s.mp4"),
+    "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
+    "-f", "lavfi", "-i", "sine=frequency=660:duration=5",
+    "-map", "0:v:0", "-map", "1:a", "-map", "2:a", "-t", "5",
+    "-c:v", "copy",
+    "-c:a:0", "aac", "-b:a:0", "128k",
+    "-c:a:1", "ac3", "-b:a:1", "192k",
+    (Join-Path $Out "multi_audio_5s.mkv")
+)
+
 Write-Host ""
 Write-Host "Generated test media:"
 Get-ChildItem $Out -File | Sort-Object Name | Select-Object Name, Length

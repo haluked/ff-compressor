@@ -33,3 +33,20 @@ The test screens are transient; the cards are the normal quality-step state.
 - `m4-hdr-cards.png` — HDR10 source: SSIM cards before preview.
 - `m4-hdr-preview.png` — HDR10 preview tone-mapped to SDR with the
   `HDR preview converted to SDR for display.` note.
+
+## M5 — compression
+
+- `m5-settings.png` — compression step defaults: MKV, H.265, Opus at Music
+  36 kbps, with the selected quality, estimate, destination and audio summary.
+- `m5-settings-mp4-h264.png` — MP4 + H.264 selected; audio switches to AAC and
+  the compatibility note changes.
+- `m5-settings-multichannel.png` — 5.1 source with the `DOWNMIX TO STEREO`
+  proposal and note.
+- `m5-custom-bitrate.png` — custom bitrate dialog with the Game Boy-styled
+  input field.
+- `m5-settings-custom-bitrate.png` — settings after applying a custom
+  48 kbps value.
+- `m5-progress.png` — compression in progress with percentage, elapsed time,
+  speed, time estimate and `CANCEL`.
+- `m5-done.png` — completed and verified output with the destination folder,
+  file name, size and `OPEN FOLDER`.
