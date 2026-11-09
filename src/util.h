@@ -3,8 +3,25 @@
 #define UTIL_H
 
 #include <wchar.h>
+#include <windows.h>
 
 #define UTIL_PATH_MAX 4096
+
+typedef enum {
+    UTIL_RUN_OK = 0,
+    UTIL_RUN_START,
+    UTIL_RUN_TIMEOUT,
+    UTIL_RUN_CANCELLED,
+    UTIL_RUN_OOM
+} UtilRunResult;
+
+/* Run a hidden child process, capture merged stdout/stderr (bounded), and
+   return its exit code. `cancel` is polled every 20 ms; `timeout_ms` 0 means
+   no timeout. The caller owns the returned buffer. */
+UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
+                               volatile int *cancel,
+                               char **out, size_t *out_len,
+                               DWORD *exit_code);
 
 int  util_file_exists(const wchar_t *path);
 int  util_dir_exists(const wchar_t *path);

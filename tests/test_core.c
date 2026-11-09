@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "probe.h"
+#include "hw.h"
 #include "strings.h"
 #include "util.h"
 
@@ -208,6 +209,95 @@ static void test_no_video_and_bad_json(void)
     CHECK(parse(bad, &s) == PROBE_ERR_BAD_JSON, "Broken JSON is rejected");
 }
 
+static void test_hw_profiles(void)
+{
+    HwInfo h;
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.speed8_median[HW_ENC_X265] = 1.10;
+    CHECK(hw_choose_profile_raw(&h) == HW_PROFILE_BALANCED, "x265 1.1x -> Balanced");
+
+    h.speed8_median[HW_ENC_X265] = 0.80;
+    CHECK(hw_choose_profile_raw(&h) == HW_PROFILE_LIGHT, "x265 0.8x -> Light");
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 30.0;
+    h.speed8_median[HW_ENC_X265] = 1.5;
+    CHECK(hw_choose_profile_raw(&h) == HW_PROFILE_THOROUGH, "fast GPU -> Thorough");
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.speed8_median[HW_ENC_X265] = 3.2;
+    CHECK(hw_choose_profile_raw(&h) == HW_PROFILE_THOROUGH, "fast x265 -> Thorough");
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 10.0;
+    h.speed8_median[HW_ENC_X265] = 1.5;
+    CHECK(hw_choose_profile_raw(&h) == HW_PROFILE_BALANCED, "mid GPU -> Balanced");
+
+    /* Hysteresis: 20% margin. */
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 3.2;
+    h.speed8_median[HW_ENC_X265] = 1.1;
+    CHECK(hw_choose_profile_raw(&h) == HW_PROFILE_BALANCED, "hysteresis raw Balanced");
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_LIGHT) == HW_PROFILE_LIGHT,
+          "Light keeps below 20% margin");
+
+    h.speed8_median[HW_ENC_AMF] = 3.8;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_LIGHT) == HW_PROFILE_BALANCED,
+          "Light changes above 20% margin");
+
+    hw_info_init(&h);
+    h.logical_cores = 8;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 26.0;
+    h.speed8_median[HW_ENC_X265] = 1.5;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_BALANCED) == HW_PROFILE_BALANCED,
+          "Balanced keeps near Thorough boundary");
+
+    h.speed8_median[HW_ENC_AMF] = 31.0;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_BALANCED) == HW_PROFILE_THOROUGH,
+          "Balanced changes clearly above Thorough boundary");
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 2.0;
+    h.speed8_median[HW_ENC_X265] = 0.7;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_BALANCED) == HW_PROFILE_LIGHT,
+          "Balanced changes clearly below Light boundary");
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 2.9;
+    h.speed8_median[HW_ENC_X265] = 0.9;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_BALANCED) == HW_PROFILE_BALANCED,
+          "Balanced keeps near Light boundary");
+
+    hw_info_init(&h);
+    h.logical_cores = 24;
+    h.enc_ok8[HW_ENC_AMF] = 1;
+    h.speed8_median[HW_ENC_AMF] = 20.0;
+    h.speed8_median[HW_ENC_X265] = 2.0;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_THOROUGH) == HW_PROFILE_BALANCED,
+          "Thorough changes clearly below boundary");
+
+    h.speed8_median[HW_ENC_AMF] = 24.0;
+    CHECK(hw_choose_profile_hysteresis(&h, HW_PROFILE_THOROUGH) == HW_PROFILE_THOROUGH,
+          "Thorough keeps near boundary");
+
+    CHECK(wcscmp(hw_profile_name(HW_PROFILE_BALANCED), L"BALANCED") == 0, "profile name");
+    CHECK(wcscmp(hw_encoder_name(HW_ENC_AMF), L"AMD AMF") == 0, "encoder name");
+}
+
 static void test_strings_and_utils(void)
 {
     wchar_t buf[128];
@@ -265,6 +355,7 @@ int main(void)
     test_legacy_rotation_tag();
     test_opus_webm();
     test_no_video_and_bad_json();
+    test_hw_profiles();
     test_strings_and_utils();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

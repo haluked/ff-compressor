@@ -9,7 +9,6 @@
 #include <string.h>
 #include <wchar.h>
 
-#define PROBE_READ_LIMIT (32u * 1024u * 1024u)
 #define PROBE_TIMEOUT_MS 30000u
 
 static void copy_utf8(const char *src, wchar_t *dst, size_t cap)
@@ -296,124 +295,6 @@ const wchar_t *probe_error_text(ProbeError err)
     }
 }
 
-static int append_bytes(char **buf, size_t *cap, size_t *len, const char *src, DWORD n)
-{
-    if (*len + (size_t)n + 1 > *cap) {
-        size_t new_cap = *cap;
-        char *p;
-        while (new_cap < *len + (size_t)n + 1) {
-            if (new_cap >= PROBE_READ_LIMIT) return 0;
-            new_cap *= 2;
-        }
-        if (new_cap > PROBE_READ_LIMIT) new_cap = PROBE_READ_LIMIT;
-        if (new_cap < *len + (size_t)n + 1) return 0;
-        p = (char*)realloc(*buf, new_cap);
-        if (!p) return 0;
-        *buf = p;
-        *cap = new_cap;
-    }
-    memcpy(*buf + *len, src, n);
-    *len += n;
-    (*buf)[*len] = '\0';
-    return 1;
-}
-
-static void drain_available(HANDLE pipe, char **buf, size_t *cap, size_t *len, int *oom)
-{
-    char chunk[8192];
-    DWORD avail = 0;
-    while (PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL) && avail > 0) {
-        DWORD want = avail > (DWORD)sizeof(chunk) ? (DWORD)sizeof(chunk) : avail;
-        DWORD got = 0;
-        if (!ReadFile(pipe, chunk, want, &got, NULL) || got == 0) break;
-        if (!append_bytes(buf, cap, len, chunk, got)) { *oom = 1; return; }
-    }
-}
-
-static ProbeError run_ffprobe_cmd(const wchar_t *cmd, char **out, size_t *out_len)
-{
-    HANDLE rd = NULL, wr = NULL;
-    SECURITY_ATTRIBUTES sa;
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    char *buf = NULL;
-    size_t cap = 65536, len = 0;
-    int oom = 0, timed_out = 0;
-    DWORD exit_code = 0;
-    DWORD started;
-
-    if (out) *out = NULL;
-    if (out_len) *out_len = 0;
-    if (!cmd || !out || !out_len) return PROBE_ERR_START;
-
-    memset(&sa, 0, sizeof(sa));
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return PROBE_ERR_START;
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    si.hStdInput = INVALID_HANDLE_VALUE;
-    si.hStdOutput = wr;
-    si.hStdError = wr;
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    memset(&pi, 0, sizeof(pi));
-    if (!CreateProcessW(NULL, (LPWSTR)cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
-                        NULL, NULL, &si, &pi)) {
-        CloseHandle(wr);
-        CloseHandle(rd);
-        return PROBE_ERR_START;
-    }
-    CloseHandle(wr);
-
-    buf = (char*)malloc(cap);
-    if (!buf) {
-        TerminateProcess(pi.hProcess, 1);
-        WaitForSingleObject(pi.hProcess, 3000);
-        CloseHandle(rd);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        return PROBE_ERR_OUT_OF_MEMORY;
-    }
-    buf[0] = '\0';
-
-    started = GetTickCount();
-    for (;;) {
-        DWORD avail = 0;
-        if (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) && avail > 0) {
-            drain_available(rd, &buf, &cap, &len, &oom);
-            if (oom) break;
-            continue;
-        }
-        if (WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0) {
-            drain_available(rd, &buf, &cap, &len, &oom);
-            break;
-        }
-        if (GetTickCount() - started > PROBE_TIMEOUT_MS) {
-            timed_out = 1;
-            TerminateProcess(pi.hProcess, 1);
-            break;
-        }
-    }
-
-    WaitForSingleObject(pi.hProcess, 3000);
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(rd);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    if (oom) { free(buf); return PROBE_ERR_OUT_OF_MEMORY; }
-    if (timed_out) { free(buf); return PROBE_ERR_TIMEOUT; }
-    if (exit_code != 0 || len == 0) { free(buf); return PROBE_ERR_FAILED; }
-
-    *out = buf;
-    *out_len = len;
-    return PROBE_OK;
-}
-
 static int cmp_double(const void *a, const void *b)
 {
     double x = *(const double*)a;
@@ -431,6 +312,7 @@ static int detect_vfr_extra(const wchar_t *ffprobe, const wchar_t *path)
     wchar_t cmd[UTIL_PATH_MAX * 2 + 256];
     char *buf = NULL;
     size_t len = 0;
+    DWORD exit_code = 0;
     double pts[2048];
     double deltas[2047];
     int n = 0, dn = 0, i;
@@ -444,7 +326,8 @@ static int detect_vfr_extra(const wchar_t *ffprobe, const wchar_t *path)
         L"-show_entries packet=pts_time -of csv=p=0 %ls", q_tool, q_path);
     cmd[(sizeof(cmd) / sizeof(wchar_t)) - 1] = L'\0';
 
-    if (run_ffprobe_cmd(cmd, &buf, &len) != PROBE_OK) return 0;
+    if (util_run_capture(cmd, PROBE_TIMEOUT_MS, NULL, &buf, &len, &exit_code) != UTIL_RUN_OK) return 0;
+    if (exit_code != 0 || len == 0) { free(buf); return 0; }
 
     p = buf;
     while (*p && n < 2048) {
@@ -486,6 +369,8 @@ ProbeError probe_run(const wchar_t *path, SourceInfo *out)
     wchar_t cmd[UTIL_PATH_MAX * 2 + 128];
     char *buf = NULL;
     size_t len = 0;
+    DWORD exit_code = 0;
+    UtilRunResult run;
     ProbeError result;
 
     if (!out) return PROBE_ERR_BAD_JSON;
@@ -500,8 +385,14 @@ ProbeError probe_run(const wchar_t *path, SourceInfo *out)
         L"%ls -v error -print_format json -show_format -show_streams %ls", q_tool, q_path);
     cmd[(sizeof(cmd) / sizeof(wchar_t)) - 1] = L'\0';
 
-    result = run_ffprobe_cmd(cmd, &buf, &len);
-    if (result != PROBE_OK) return result;
+    run = util_run_capture(cmd, PROBE_TIMEOUT_MS, NULL, &buf, &len, &exit_code);
+    if (run == UTIL_RUN_START) return PROBE_ERR_START;
+    if (run == UTIL_RUN_TIMEOUT) return PROBE_ERR_TIMEOUT;
+    if (run == UTIL_RUN_OOM) return PROBE_ERR_OUT_OF_MEMORY;
+    if (run != UTIL_RUN_OK || exit_code != 0 || len == 0) {
+        free(buf);
+        return PROBE_ERR_FAILED;
+    }
 
     result = probe_parse_json(buf, out);
     free(buf);

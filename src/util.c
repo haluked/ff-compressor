@@ -57,6 +57,12 @@ int util_find_tool(const wchar_t *name, wchar_t *out, size_t cap)
     candidate[UTIL_PATH_MAX - 1] = L'\0';
     if (util_file_exists(candidate)) { wcsncpy(out, candidate, cap - 1); out[cap - 1] = L'\0'; return 1; }
 
+    /* Development builds live in tests\build; the portable tools stay in the
+       project's bin\ folder. This candidate is harmless for release builds. */
+    _snwprintf(candidate, UTIL_PATH_MAX, L"%ls\\..\\..\\bin\\%ls.exe", app, name);
+    candidate[UTIL_PATH_MAX - 1] = L'\0';
+    if (util_file_exists(candidate)) { wcsncpy(out, candidate, cap - 1); out[cap - 1] = L'\0'; return 1; }
+
     if (SearchPathW(NULL, name, L".exe", (DWORD)cap, out, NULL) > 0) {
         out[cap - 1] = L'\0';
         return 1;
@@ -151,6 +157,164 @@ void util_get_temp_dir(wchar_t *out, size_t cap)
         wcsncpy(out, L".", cap - 1);
         out[cap - 1] = L'\0';
     }
+}
+
+#define UTIL_CAPTURE_LIMIT (32u * 1024u * 1024u)
+
+static int capture_append(char **buf, size_t *cap, size_t *len, const char *src, DWORD n)
+{
+    if (*len + (size_t)n + 1 > *cap) {
+        size_t new_cap = *cap;
+        char *p;
+        while (new_cap < *len + (size_t)n + 1) {
+            if (new_cap >= UTIL_CAPTURE_LIMIT) return 0;
+            new_cap *= 2;
+        }
+        if (new_cap > UTIL_CAPTURE_LIMIT) new_cap = UTIL_CAPTURE_LIMIT;
+        if (new_cap < *len + (size_t)n + 1) return 0;
+        p = (char*)realloc(*buf, new_cap);
+        if (!p) return 0;
+        *buf = p;
+        *cap = new_cap;
+    }
+    memcpy(*buf + *len, src, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+    return 1;
+}
+
+static void capture_drain(HANDLE pipe, char **buf, size_t *cap, size_t *len, int *oom)
+{
+    char chunk[8192];
+    DWORD avail = 0;
+    while (PeekNamedPipe(pipe, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+        DWORD want = avail > (DWORD)sizeof(chunk) ? (DWORD)sizeof(chunk) : avail;
+        DWORD got = 0;
+        if (!ReadFile(pipe, chunk, want, &got, NULL) || got == 0) break;
+        if (!capture_append(buf, cap, len, chunk, got)) { *oom = 1; return; }
+    }
+}
+
+UtilRunResult util_run_capture(const wchar_t *cmd, DWORD timeout_ms,
+                               volatile int *cancel,
+                               char **out, size_t *out_len,
+                               DWORD *exit_code)
+{
+    HANDLE rd = NULL, wr = NULL, job = NULL;
+    SECURITY_ATTRIBUTES sa;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    wchar_t *cmd_copy = NULL;
+    char *buf = NULL;
+    size_t cap = 65536, len = 0;
+    int oom = 0, timed_out = 0, was_cancelled = 0;
+    DWORD code = 0;
+    DWORD started;
+    UtilRunResult result = UTIL_RUN_START;
+
+    memset(&pi, 0, sizeof(pi));
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (exit_code) *exit_code = 0;
+    if (!cmd || !out || !out_len) return UTIL_RUN_START;
+    if (cancel && *cancel) return UTIL_RUN_CANCELLED;
+
+    cmd_copy = _wcsdup(cmd);
+    if (!cmd_copy) return UTIL_RUN_OOM;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) goto cleanup;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.hStdInput = INVALID_HANDLE_VALUE;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    memset(&pi, 0, sizeof(pi));
+    if (!CreateProcessW(NULL, cmd_copy, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW | CREATE_SUSPENDED,
+                        NULL, NULL, &si, &pi)) {
+        goto cleanup;
+    }
+    CloseHandle(wr);
+    wr = NULL;
+
+    job = CreateJobObjectW(NULL, NULL);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info;
+        memset(&info, 0, sizeof(info));
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info)) ||
+            !AssignProcessToJobObject(job, pi.hProcess)) {
+            CloseHandle(job);
+            job = NULL;
+        }
+    }
+    ResumeThread(pi.hThread);
+
+    buf = (char*)malloc(cap);
+    if (!buf) {
+        result = UTIL_RUN_OOM;
+        goto stop_process;
+    }
+    buf[0] = '\0';
+
+    started = GetTickCount();
+    for (;;) {
+        DWORD avail = 0;
+        if (cancel && *cancel) {
+            was_cancelled = 1;
+            break;
+        }
+        if (PeekNamedPipe(rd, NULL, 0, NULL, &avail, NULL) && avail > 0) {
+            capture_drain(rd, &buf, &cap, &len, &oom);
+            if (oom) break;
+            continue;
+        }
+        if (WaitForSingleObject(pi.hProcess, 20) == WAIT_OBJECT_0) {
+            capture_drain(rd, &buf, &cap, &len, &oom);
+            break;
+        }
+        if (timeout_ms != 0 && GetTickCount() - started > timeout_ms) {
+            timed_out = 1;
+            break;
+        }
+    }
+
+stop_process:
+    if (was_cancelled || timed_out || result == UTIL_RUN_OOM) {
+        if (job) TerminateJobObject(job, 1);
+        else TerminateProcess(pi.hProcess, 1);
+    }
+    WaitForSingleObject(pi.hProcess, 3000);
+    GetExitCodeProcess(pi.hProcess, &code);
+
+cleanup:
+    if (wr) CloseHandle(wr);
+    if (rd) CloseHandle(rd);
+    if (job) CloseHandle(job);
+    if (pi.hThread) CloseHandle(pi.hThread);
+    if (pi.hProcess) CloseHandle(pi.hProcess);
+    free(cmd_copy);
+
+    if (result == UTIL_RUN_OOM) {
+        free(buf);
+        return UTIL_RUN_OOM;
+    }
+    if (was_cancelled) { free(buf); return UTIL_RUN_CANCELLED; }
+    if (timed_out) { free(buf); return UTIL_RUN_TIMEOUT; }
+    if (!buf) return UTIL_RUN_START;
+
+    *out = buf;
+    *out_len = len;
+    if (exit_code) *exit_code = code;
+    return UTIL_RUN_OK;
 }
 
 void util_format_bytes(long long bytes, wchar_t *out, size_t cap)

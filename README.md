@@ -4,10 +4,10 @@ A small, native Windows video compressor built in C with a Game Boy-inspired
 interface. It uses a portable FFmpeg build for analysis and encoding; the
 application itself has no Python, .NET, Electron or Qt runtime.
 
-**Status:** M1 (analysis) is implemented. Hardware tests, quality comparison,
-sample estimates and compression arrive in M2–M6.
+**Status:** M2 (analysis + first-launch hardware test) is implemented. Quality
+comparison, sample estimates and compression arrive in M3–M6.
 
-## What works in M1
+## What works in M1/M2
 
 - Choose a video with the file picker or drag and drop it onto the window.
 - Read it with `ffprobe` in a background worker.
@@ -17,6 +17,18 @@ sample estimates and compression arrive in M2–M6.
 - Friendly errors for missing tools, unreadable files, timeouts and unsupported
   containers.
 - Unicode paths, fixed 646×485 Game Boy layout, per-monitor DPI.
+- First-launch computer test: CPU/GPU detection, FFmpeg encoder listing, and
+  real 1-second encodes for NVENC, QSV, AMF and CPU x265 (8-bit, plus 10-bit
+  for GPU encoders).
+- One warm-up run, then three measured runs per encoder; the median is used.
+  A 20% hysteresis margin keeps a stored profile stable near a threshold.
+- Profiles: Light / Balanced / Thorough. The result is stored in
+  `HKCU\Software\ff-compressor`; the app re-tests automatically when the GPU,
+  driver, CPU or FFmpeg version changes.
+- `RE-TEST PC` re-runs the test. `TEST: AUTO/LIGHT/BALANCED/THOROUGH` overrides
+  the test depth used by per-video tests.
+- `Skip` selects the Light profile immediately.
+- Measurement log: `%LOCALAPPDATA%\ff-compressor\hwtest.log`.
 
 The second and third wizard steps are visible but intentionally inactive until
 the next milestones.
@@ -43,6 +55,23 @@ by git.
 
 The executable is written to `dist\ff-compressor.exe`. The build fails if the
 executable exceeds 1 MB.
+
+## Hardware test harness
+
+`tests\hwtest_cli.c` runs the same `hw_run_test()` as the UI without opening a
+window. It prints the per-run speeds, medians, chosen profile and appends the
+same log entry:
+
+```cmd
+gcc -std=c11 -O2 -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 ^
+    -Isrc tests\hwtest_cli.c src\hw.c src\util.c src\strings.c ^
+    -o tests\build\hwtest_cli.exe ^
+    -lole32 -luuid -ldxguid -lshell32 -ladvapi32 -lgdi32 -luser32
+
+tests\build\hwtest_cli.exe 3
+```
+
+The capability-test settings are fixed in `src/hw.c` and logged verbatim.
 
 ## Test media
 

@@ -28,12 +28,13 @@ gcc -std=c11 -O3 -s -flto ^
     src\gb_ui.c ^
     src\engine.c ^
     src\probe.c ^
+    src\hw.c ^
     src\util.c ^
     src\strings.c ^
     src\cjson.c ^
     res.o ^
     -o dist\ff-compressor.exe ^
-    -lole32 -luuid -lshell32 -ladvapi32 -lgdi32 -luser32
+    -lole32 -luuid -ldxguid -lshell32 -ladvapi32 -lgdi32 -luser32
 
 if errorlevel 1 (
     echo [ERROR] GCC compilation failed!

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "ui.h"
 #include "engine.h"
+#include "hw.h"
 #include "probe.h"
 #include "strings.h"
 #include "util.h"
@@ -28,6 +29,9 @@
 #define IDC_BTN_DETAILS  3003
 #define IDC_BTN_MIN      3004
 #define IDC_BTN_CLOSE    3005
+#define IDC_BTN_RETEST   3006
+#define IDC_BTN_DEPTH    3007
+#define IDC_BTN_SKIP     3008
 
 #define BASE_CLIENT_W 646
 #define BASE_CLIENT_H 485
@@ -48,6 +52,9 @@ static HWND g_hBtnContinue = NULL;
 static HWND g_hBtnDetails = NULL;
 static HWND g_hBtnMin = NULL;
 static HWND g_hBtnClose = NULL;
+static HWND g_hBtnRetest = NULL;
+static HWND g_hBtnDepth = NULL;
+static HWND g_hBtnSkip = NULL;
 
 static HFONT g_fontTitle = NULL;
 static HFONT g_fontBold = NULL;
@@ -74,15 +81,36 @@ static RECT g_rc_panel;
 static RECT g_rc_drop;
 static RECT g_rc_status;
 
+static HwInfo g_hw_info;
+static int g_hw_has_info = 0;
+static int g_hw_testing = 0;
+static int g_hw_skipped = 0;
+static int g_hw_override = HW_PROFILE_AUTO;
+static HwProgress g_hw_progress;
+static HwError g_hw_error = HW_ERR_NONE;
+static ULONGLONG g_hw_start_tick = 0;
+static int g_hw_est_seconds = 20;
+static volatile int g_hw_cancel = 0;
+static wchar_t g_hw_pending_path[UTIL_PATH_MAX];
+static wchar_t g_depth_items[4][32];
+
 typedef struct {
     ProbeError error;
     SourceInfo info;
 } ProbeDoneMsg;
 
+typedef struct {
+    HwTestResult result;
+    HwInfo info;
+} HwDoneMsg;
+
 static void layout_controls(void);
 static void update_controls_visibility(void);
 static void start_probe(HWND hWnd, const wchar_t *path);
 static void set_status_text(const wchar_t *s, int is_error);
+static void hw_ui_start(HWND hWnd, int auto_test, const wchar_t *pending_path);
+static void hw_ui_update_depth_label(void);
+static void hw_ui_open_depth_dropdown(void);
 
 static int S(int value)
 {
@@ -729,6 +757,110 @@ static void draw_details(HDC hdc, const SourceInfo *s)
     draw_field(hdc, x2, y + row * 9, w2, text(STR_LABEL_TRACKS), buf2);
 }
 
+static void draw_progress_bar(HDC hdc, const RECT *prc, int percent)
+{
+    RECT inner;
+    int inner_w, fill_w, x;
+    int block, gap;
+
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+
+    gb_fill(hdc, prc, GB_LIGHT);
+    gb_frame_round(hdc, prc, GB_DARKEST, S(2), GB_LIGHTEST, GB_LIGHT, 0);
+
+    inner = *prc;
+    InflateRect(&inner, -S(3), -S(3));
+    inner_w = inner.right - inner.left;
+    if (inner_w <= 0) return;
+
+    fill_w = MulDiv(inner_w, percent, 100);
+    block = S(7);
+    gap = S(2);
+    if (block < 2) block = 2;
+    if (gap < 1) gap = 1;
+
+    for (x = block + gap; x < inner_w; x += block + gap) {
+        RECT s;
+        s.left = inner.left + x - gap;
+        s.top = inner.top;
+        s.right = s.left + 1;
+        s.bottom = inner.bottom;
+        gb_fill(hdc, &s, GB_DARK);
+    }
+    for (x = 0; x < fill_w; x += block + gap) {
+        RECT b;
+        b.left = inner.left + x;
+        b.top = inner.top;
+        b.right = b.left + block;
+        if (b.right > inner.left + fill_w) b.right = inner.left + fill_w;
+        b.bottom = inner.bottom;
+        if (b.right > b.left) gb_fill(hdc, &b, GB_DARKEST);
+    }
+}
+
+static void draw_hw_test(HDC hdc)
+{
+    wchar_t buf[512];
+    RECT tr;
+    RECT bar;
+    int percent = 0;
+    int elapsed = (int)((GetTickCount64() - g_hw_start_tick) / 1000);
+
+    if (g_hw_progress.run_total > 0) {
+        percent = g_hw_progress.run_done * 100 / g_hw_progress.run_total;
+    }
+
+    tr.left = S(32);
+    tr.top = S(114);
+    tr.right = S(614);
+    tr.bottom = S(156);
+    gb_text(hdc, g_fontBold, GB_DARKEST, &tr, text(STR_HW_HEADING),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    _snwprintf(buf, 512, text(STR_HW_ABOUT_FMT), g_hw_est_seconds);
+    buf[511] = L'\0';
+    tr.top = S(158);
+    tr.bottom = S(178);
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &tr, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    buf[0] = L'\0';
+    if (g_hw_progress.event == HW_EVT_RUN) {
+        if (g_hw_progress.warmup) {
+            _snwprintf(buf, 512, text(STR_HW_WARMUP_FMT),
+                       hw_encoder_name(g_hw_progress.encoder), g_hw_progress.bit_depth);
+        } else {
+            _snwprintf(buf, 512, text(STR_HW_RUN_FMT),
+                       hw_encoder_name(g_hw_progress.encoder), g_hw_progress.bit_depth,
+                       g_hw_progress.run_done, g_hw_progress.run_total);
+        }
+        buf[511] = L'\0';
+    } else {
+        wcsncpy(buf, text(STR_STATUS_HW), 511);
+        buf[511] = L'\0';
+    }
+    tr.top = S(184);
+    tr.bottom = S(206);
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &tr, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    SetRect(&bar, S(32), S(216), S(614), S(230));
+    draw_progress_bar(hdc, &bar, percent);
+
+    _snwprintf(buf, 512, text(STR_HW_ELAPSED_FMT), elapsed);
+    buf[511] = L'\0';
+    tr.top = S(238);
+    tr.bottom = S(258);
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &tr, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    tr.top = S(276);
+    tr.bottom = S(320);
+    gb_text(hdc, g_fontSmall, GB_DARK, &tr, text(STR_HW_NOTE),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+}
+
 static void paint_main(HWND hWnd, HDC hdc)
 {
     RECT rc;
@@ -759,15 +891,19 @@ static void paint_main(HWND hWnd, HDC hdc)
     }
 
     draw_steps(hdc, cw);
-    draw_panel(hdc, &g_rc_panel, text(STR_PANEL_VIDEO));
-
-    if (g_probing) {
-        draw_probing(hdc);
-    } else if (g_has_info) {
-        if (g_show_details) draw_details(hdc, &g_info);
-        else draw_summary(hdc, &g_info);
+    if (g_hw_testing) {
+        draw_panel(hdc, &g_rc_panel, text(STR_HW_PANEL));
+        draw_hw_test(hdc);
     } else {
-        draw_empty(hdc, NULL);
+        draw_panel(hdc, &g_rc_panel, text(STR_PANEL_VIDEO));
+        if (g_probing) {
+            draw_probing(hdc);
+        } else if (g_has_info) {
+            if (g_show_details) draw_details(hdc, &g_info);
+            else draw_summary(hdc, &g_info);
+        } else {
+            draw_empty(hdc, NULL);
+        }
     }
 
     draw_status_strip(hdc);
@@ -790,7 +926,10 @@ static void layout_controls(void)
     SetRect(&g_rc_status, S(20), S(434), cw - S(20), S(470));
 
     SetWindowPos(g_hBtnChoose, NULL, S(32), S(388), btn_w, btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnRetest, NULL, S(180), S(388), S(110), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnDepth, NULL, S(298), S(388), S(170), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnContinue, NULL, cw - S(32) - btn_w, S(388), btn_w, btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnSkip, NULL, cw - S(32) - S(160), S(388), S(160), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnDetails, NULL, S(32), S(340), S(150), S(26), SWP_NOZORDER);
 
     {
@@ -809,10 +948,28 @@ static void layout_controls(void)
 static void update_controls_visibility(void)
 {
     if (!g_hWnd) return;
-    ShowWindow(g_hBtnDetails, g_has_info ? SW_SHOW : SW_HIDE);
-    SetWindowTextW(g_hBtnDetails, text(g_show_details ? STR_BTN_HIDE_DETAILS : STR_BTN_DETAILS));
-    EnableWindow(g_hBtnContinue, (g_has_info && !g_probing) ? TRUE : FALSE);
-    EnableWindow(g_hBtnChoose, g_probing ? FALSE : TRUE);
+
+    if (g_hw_testing) {
+        ShowWindow(g_hBtnChoose, SW_HIDE);
+        ShowWindow(g_hBtnContinue, SW_HIDE);
+        ShowWindow(g_hBtnDetails, SW_HIDE);
+        ShowWindow(g_hBtnRetest, SW_HIDE);
+        ShowWindow(g_hBtnDepth, SW_HIDE);
+        ShowWindow(g_hBtnSkip, SW_SHOW);
+        EnableWindow(g_hBtnSkip, g_hw_skipped ? FALSE : TRUE);
+    } else {
+        ShowWindow(g_hBtnSkip, SW_HIDE);
+        ShowWindow(g_hBtnChoose, SW_SHOW);
+        ShowWindow(g_hBtnContinue, SW_SHOW);
+        ShowWindow(g_hBtnRetest, SW_SHOW);
+        ShowWindow(g_hBtnDepth, SW_SHOW);
+        ShowWindow(g_hBtnDetails, g_has_info ? SW_SHOW : SW_HIDE);
+        SetWindowTextW(g_hBtnDetails, text(g_show_details ? STR_BTN_HIDE_DETAILS : STR_BTN_DETAILS));
+        EnableWindow(g_hBtnContinue, (g_has_info && !g_probing) ? TRUE : FALSE);
+        EnableWindow(g_hBtnChoose, g_probing ? FALSE : TRUE);
+        EnableWindow(g_hBtnRetest, g_probing ? FALSE : TRUE);
+        EnableWindow(g_hBtnDepth, TRUE);
+    }
     InvalidateRect(g_hWnd, NULL, FALSE);
 }
 
@@ -859,6 +1016,225 @@ static void start_probe(HWND hWnd, const wchar_t *path)
         update_controls_visibility();
         gb_message_box(hWnd, text(STR_MSG_PROBE_TITLE), text(STR_MSG_BUSY), MB_OK | MB_ICONWARNING);
     }
+}
+
+static void hw_ui_refresh_ready_status(void)
+{
+    wchar_t buf[256];
+    if (g_hw_override != HW_PROFILE_AUTO) {
+        _snwprintf(buf, 256, text(STR_HW_READY_DEPTH_FMT), hw_profile_name(g_hw_override));
+        buf[255] = L'\0';
+        set_status_text(buf, 0);
+    } else if (g_hw_has_info && g_hw_info.profile >= 0) {
+        _snwprintf(buf, 256, text(STR_HW_READY_FMT), hw_profile_name(g_hw_info.profile));
+        buf[255] = L'\0';
+        set_status_text(buf, 0);
+    } else {
+        set_status_id(STR_STATUS_READY, 0);
+    }
+}
+
+static void hw_ui_update_depth_label(void)
+{
+    wchar_t buf[64];
+    _snwprintf(buf, 64, text(STR_BTN_DEPTH_FMT), hw_profile_name(g_hw_override));
+    buf[63] = L'\0';
+    SetWindowTextW(g_hBtnDepth, buf);
+}
+
+static void on_depth_picked(int index, void *user)
+{
+    (void)user;
+    g_hw_override = (index == 0) ? HW_PROFILE_AUTO : (index - 1);
+    hw_set_override(g_hw_override);
+    hw_ui_update_depth_label();
+    hw_ui_refresh_ready_status();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void hw_ui_open_depth_dropdown(void)
+{
+    const wchar_t *ptrs[4];
+    RECT anchor;
+    int selected;
+    int i;
+
+    wcsncpy(g_depth_items[0], text(STR_PROFILE_AUTO), 31);
+    wcsncpy(g_depth_items[1], text(STR_PROFILE_LIGHT), 31);
+    wcsncpy(g_depth_items[2], text(STR_PROFILE_BALANCED), 31);
+    wcsncpy(g_depth_items[3], text(STR_PROFILE_THOROUGH), 31);
+    for (i = 0; i < 4; i++) {
+        g_depth_items[i][31] = L'\0';
+        ptrs[i] = g_depth_items[i];
+    }
+    selected = (g_hw_override == HW_PROFILE_AUTO) ? 0 : (g_hw_override + 1);
+
+    GetWindowRect(g_hBtnDepth, &anchor);
+    MapWindowPoints(NULL, g_hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(g_hWnd, &anchor, ptrs, 4, selected, on_depth_picked, NULL);
+}
+
+static void hw_progress_cb(const HwProgress *p, void *user)
+{
+    HwProgress *copy;
+    HWND hWnd = (HWND)user;
+    if (!p || !hWnd) return;
+    copy = (HwProgress*)malloc(sizeof(HwProgress));
+    if (!copy) return;
+    *copy = *p;
+    if (!PostMessageW(hWnd, WM_APP_HW_PROGRESS, 0, (LPARAM)copy)) free(copy);
+}
+
+typedef struct {
+    HWND hwnd;
+} HwJob;
+
+static DWORD WINAPI hw_thread_proc(LPVOID param)
+{
+    HwJob *job = (HwJob*)param;
+    HwDoneMsg *msg;
+    HwTestResult result;
+
+    msg = (HwDoneMsg*)calloc(1, sizeof(HwDoneMsg));
+    if (!msg) {
+        free(job);
+        return 0;
+    }
+    result = hw_run_test(&msg->info, hw_progress_cb, job->hwnd, &g_hw_cancel);
+    msg->result = result;
+    if (!PostMessageW(job->hwnd, WM_APP_HW_DONE, 0, (LPARAM)msg)) free(msg);
+    free(job);
+    return 0;
+}
+
+static void hw_ui_skip(void)
+{
+    if (!g_hw_testing) return;
+    g_hw_skipped = 1;
+    g_hw_cancel = 1;
+    EnableWindow(g_hBtnSkip, FALSE);
+    set_status_text(text(STR_HW_SKIPPED), 0);
+}
+
+static void hw_ui_start(HWND hWnd, int auto_test, const wchar_t *pending_path)
+{
+    HwJob *job;
+    HANDLE thread;
+
+    if (g_hw_testing) return;
+    (void)auto_test;
+
+    g_hw_testing = 1;
+    g_hw_skipped = 0;
+    g_hw_error = HW_ERR_NONE;
+    memset(&g_hw_progress, 0, sizeof(g_hw_progress));
+    g_hw_start_tick = GetTickCount64();
+    g_hw_est_seconds = 20;
+    g_hw_cancel = 0;
+    g_hw_pending_path[0] = L'\0';
+    if (pending_path && *pending_path) {
+        wcsncpy(g_hw_pending_path, pending_path, UTIL_PATH_MAX - 1);
+        g_hw_pending_path[UTIL_PATH_MAX - 1] = L'\0';
+    }
+
+    set_status_id(STR_STATUS_HW, 0);
+    update_controls_visibility();
+    SetFocus(g_hBtnSkip);
+    InvalidateRect(hWnd, NULL, FALSE);
+
+    job = (HwJob*)calloc(1, sizeof(HwJob));
+    if (!job) {
+        g_hw_testing = 0;
+        set_status_text(text(STR_HW_FAILED), 1);
+        update_controls_visibility();
+        return;
+    }
+    job->hwnd = hWnd;
+    thread = CreateThread(NULL, 0, hw_thread_proc, job, 0, NULL);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        free(job);
+        g_hw_testing = 0;
+        set_status_text(text(STR_HW_FAILED), 1);
+        update_controls_visibility();
+    }
+}
+
+static void hw_ui_on_done(HWND hWnd, HwDoneMsg *msg)
+{
+    wchar_t buf[256];
+    int profile;
+    int should_probe = 0;
+    wchar_t probe_path[UTIL_PATH_MAX];
+
+    if (!msg) return;
+    probe_path[0] = L'\0';
+
+    if (g_hw_skipped || msg->result == HW_TEST_CANCELLED) {
+        g_hw_info = msg->info;
+        g_hw_info.test_version = HW_TEST_VERSION;
+        g_hw_info.profile_raw = HW_PROFILE_LIGHT;
+        g_hw_info.profile = HW_PROFILE_LIGHT;
+        g_hw_info.skipped = 1;
+        g_hw_info.total_seconds = (double)(GetTickCount64() - g_hw_start_tick) / 1000.0;
+        hw_stamp_now(&g_hw_info);
+        hw_save(&g_hw_info);
+        hw_log_result(&g_hw_info);
+        g_hw_has_info = 1;
+        set_status_text(text(STR_HW_SKIPPED), 0);
+        gb_message_box(hWnd, text(STR_HW_PANEL), text(STR_HW_SKIPPED),
+                       MB_OK | MB_ICONINFORMATION);
+    } else if (msg->result == HW_TEST_ERROR) {
+        g_hw_info = msg->info;
+        g_hw_info.test_version = 0; /* retry automatically on next launch */
+        g_hw_info.profile_raw = HW_PROFILE_LIGHT;
+        g_hw_info.profile = HW_PROFILE_LIGHT;
+        g_hw_info.skipped = 1;
+        g_hw_info.total_seconds = (double)(GetTickCount64() - g_hw_start_tick) / 1000.0;
+        hw_stamp_now(&g_hw_info);
+        hw_save(&g_hw_info);
+        hw_log_result(&g_hw_info);
+        g_hw_has_info = 1;
+        if (g_hw_error == HW_ERR_FFMPEG) {
+            set_status_text(text(STR_HW_ERROR_FFMPEG), 1);
+            gb_message_box(hWnd, text(STR_HW_PANEL), text(STR_HW_ERROR_FFMPEG), MB_OK | MB_ICONERROR);
+        } else if (g_hw_error == HW_ERR_NO_ENCODER) {
+            set_status_text(text(STR_HW_ERROR_NO_ENCODER), 1);
+            gb_message_box(hWnd, text(STR_HW_PANEL), text(STR_HW_ERROR_NO_ENCODER), MB_OK | MB_ICONERROR);
+        } else {
+            set_status_text(text(STR_HW_FAILED), 1);
+            gb_message_box(hWnd, text(STR_HW_PANEL), text(STR_HW_FAILED), MB_OK | MB_ICONERROR);
+        }
+    } else {
+        g_hw_info = msg->info;
+        g_hw_info.skipped = 0;
+        g_hw_has_info = 1;
+        hw_save(&g_hw_info);
+        hw_log_result(&g_hw_info);
+        profile = g_hw_info.profile;
+        _snwprintf(buf, 256, text(STR_HW_DONE_FMT),
+                   hw_profile_name(profile), (int)(g_hw_info.total_seconds + 0.5));
+        buf[255] = L'\0';
+        set_status_text(buf, 0);
+    }
+
+    if (g_hw_pending_path[0]) {
+        wcsncpy(probe_path, g_hw_pending_path, UTIL_PATH_MAX - 1);
+        probe_path[UTIL_PATH_MAX - 1] = L'\0';
+        g_hw_pending_path[0] = L'\0';
+        should_probe = 1;
+    }
+
+    g_hw_testing = 0;
+    g_hw_skipped = 0;
+    g_hw_cancel = 0;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    SetFocus(g_has_info ? g_hBtnContinue : g_hBtnChoose);
+
+    if (should_probe && probe_path[0]) start_probe(hWnd, probe_path);
+    free(msg);
 }
 
 static void choose_file(HWND hWnd)
@@ -924,6 +1300,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnDetails = CreateWindowExW(0, L"BUTTON", text(STR_BTN_DETAILS),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 150, 26, hWnd, (HMENU)IDC_BTN_DETAILS, inst, NULL);
+            g_hBtnRetest = CreateWindowExW(0, L"BUTTON", text(STR_BTN_RETEST),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 110, 38, hWnd, (HMENU)IDC_BTN_RETEST, inst, NULL);
+            g_hBtnDepth = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 170, 38, hWnd, (HMENU)IDC_BTN_DEPTH, inst, NULL);
+            g_hBtnSkip = CreateWindowExW(0, L"BUTTON", text(STR_HW_SKIP),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 160, 38, hWnd, (HMENU)IDC_BTN_SKIP, inst, NULL);
             g_hBtnMin = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 26, 24, hWnd, (HMENU)IDC_BTN_MIN, inst, NULL);
@@ -934,9 +1319,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             track_button(g_hBtnChoose);
             track_button(g_hBtnContinue);
             track_button(g_hBtnDetails);
+            track_button(g_hBtnRetest);
+            track_button(g_hBtnDepth);
+            track_button(g_hBtnSkip);
             track_button(g_hBtnMin);
             track_button(g_hBtnClose);
 
+            hw_ui_update_depth_label();
+            ShowWindow(g_hBtnSkip, SW_HIDE);
             EnableWindow(g_hBtnContinue, FALSE);
             layout_controls();
             update_controls_visibility();
@@ -1018,7 +1408,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             wchar_t path[UTIL_PATH_MAX];
             path[0] = L'\0';
             if (DragQueryFileW(drop, 0, path, UTIL_PATH_MAX) > 0) {
-                start_probe(hWnd, path);
+                if (g_hw_testing) {
+                    wcsncpy(g_hw_pending_path, path, UTIL_PATH_MAX - 1);
+                    g_hw_pending_path[UTIL_PATH_MAX - 1] = L'\0';
+                    set_status_text(text(STR_HW_QUEUED), 0);
+                } else {
+                    start_probe(hWnd, path);
+                }
             }
             DragFinish(drop);
             return 0;
@@ -1055,10 +1451,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             switch (dis->CtlID) {
                 case IDC_BTN_CHOOSE:
                 case IDC_BTN_DETAILS:
+                case IDC_BTN_RETEST:
+                case IDC_BTN_SKIP:
                     role = GB_ROLE_PUSH;
                     break;
                 case IDC_BTN_CONTINUE:
                     role = GB_ROLE_PRIMARY;
+                    break;
+                case IDC_BTN_DEPTH:
+                    role = GB_ROLE_DROP;
                     break;
                 case IDC_BTN_MIN:
                     role = GB_ROLE_TITLE;
@@ -1072,7 +1473,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             if (role >= 0) {
                 HFONT font = g_fontBold;
-                if (dis->CtlID == IDC_BTN_DETAILS) font = g_fontSmall;
+                if (dis->CtlID == IDC_BTN_DETAILS ||
+                    dis->CtlID == IDC_BTN_RETEST ||
+                    dis->CtlID == IDC_BTN_DEPTH ||
+                    dis->CtlID == IDC_BTN_SKIP) {
+                    font = g_fontSmall;
+                }
                 gb_draw_control(dis, font, role, checked, tracked_hover(dis->hwndItem));
                 return TRUE;
             }
@@ -1098,6 +1504,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                         g_show_details = !g_show_details;
                         update_controls_visibility();
                     }
+                    return 0;
+                case IDC_BTN_RETEST:
+                    if (!g_hw_testing && !g_probing) hw_ui_start(hWnd, 0, NULL);
+                    return 0;
+                case IDC_BTN_DEPTH:
+                    if (!g_hw_testing) hw_ui_open_depth_dropdown();
+                    return 0;
+                case IDC_BTN_SKIP:
+                    hw_ui_skip();
                     return 0;
                 case IDC_BTN_MIN:
                     ShowWindow(hWnd, SW_MINIMIZE);
@@ -1146,11 +1561,30 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        case WM_APP_HW_PROGRESS: {
+            HwProgress *p = (HwProgress*)lParam;
+            if (p) {
+                g_hw_progress = *p;
+                if (p->event == HW_EVT_ERROR) g_hw_error = p->error;
+                free(p);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return 0;
+        }
+
+        case WM_APP_HW_DONE: {
+            HwDoneMsg *m = (HwDoneMsg*)lParam;
+            hw_ui_on_done(hWnd, m);
+            return 0;
+        }
+
         case WM_CLOSE:
+            if (g_hw_testing) g_hw_cancel = 1;
             DestroyWindow(hWnd);
             return 0;
 
         case WM_DESTROY:
+            if (g_hw_testing) g_hw_cancel = 1;
             destroy_fonts();
             g_hWnd = NULL;
             PostQuitMessage(0);
@@ -1187,6 +1621,8 @@ int ui_run(HINSTANCE hInstance, int nCmdShow, const wchar_t *initial_path)
         return 0;
     }
 
+    g_hw_override = hw_get_override();
+
     rc.left = 0; rc.top = 0; rc.right = S(BASE_CLIENT_W); rc.bottom = S(BASE_CLIENT_H);
     adjust_window_rect_for_dpi(&rc, APP_WINDOW_STYLE, FALSE, APP_WINDOW_EX_STYLE, g_dpi);
 
@@ -1210,7 +1646,18 @@ int ui_run(HINSTANCE hInstance, int nCmdShow, const wchar_t *initial_path)
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
     SetFocus(g_hBtnChoose);
-    if (initial_path && *initial_path) start_probe(hWnd, initial_path);
+
+    if (hw_load(&g_hw_info)) {
+        g_hw_has_info = 1;
+        if (hw_needs_retest(&g_hw_info)) {
+            hw_ui_start(hWnd, 1, initial_path);
+        } else {
+            hw_ui_refresh_ready_status();
+            if (initial_path && *initial_path) start_probe(hWnd, initial_path);
+        }
+    } else {
+        hw_ui_start(hWnd, 1, initial_path);
+    }
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (!IsDialogMessageW(hWnd, &msg)) {

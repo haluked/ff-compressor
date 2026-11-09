@@ -27,3 +27,12 @@ repository clean, and they cover the metadata shapes the app must handle.
 Real-world clips (Big Buck Bunny, Jellyfish, Xiph) will only be added if a
 milestone needs footage that synthetic sources cannot represent. If added, each
 file's source URL and licence will be recorded here and in the milestone report.
+
+## Developer diagnostics
+
+- `hwtest_cli.c` — runs the first-launch hardware test N times with the same
+  code as the UI and prints the measured speeds/profile.
+- `hw_detect.c` — prints CPU, GPU, driver and FFmpeg encoder detection.
+- `dxgi_test.c` — minimal DXGI adapter enumeration check.
+
+These are console-only developer tools, not part of the shipped application.
