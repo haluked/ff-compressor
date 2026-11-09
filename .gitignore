@@ -1,0 +1,20 @@
+# Build output
+/dist/
+/tests/build/
+*.o
+*.exe
+!tests/media/.keep
+
+# Portable tools (downloaded, not tracked)
+/bin/
+/tools/cache/
+
+# Local test media (downloaded/generated, not tracked)
+/tests/media/*
+!/tests/media/.keep
+
+# Editor/OS noise
+*.swp
+*~
+Thumbs.db
+desktop.ini

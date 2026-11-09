@@ -1,0 +1,33 @@
+#include <windows.h>
+
+1 24 "res/app.manifest"
+101 ICON "res/app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Haluk"
+            VALUE "FileDescription",  "FF Compressor (Win32 Native)"
+            VALUE "FileVersion",      "0.1.0.0"
+            VALUE "InternalName",     "ff-compressor"
+            VALUE "LegalCopyright",   "GPL-3.0-or-later"
+            VALUE "OriginalFilename", "ff-compressor.exe"
+            VALUE "ProductName",      "FF Compressor"
+            VALUE "ProductVersion",   "0.1.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
