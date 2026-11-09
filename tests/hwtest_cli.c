@@ -46,6 +46,9 @@ static void print_result(const HwInfo *info, HwTestResult r)
             wprintf(L" speed10=%.3f (%.3f..%.3f)", info->speed10_median[enc],
                     info->speed10_min[enc], info->speed10_max[enc]);
         }
+        if (info->enc_10bit_verified[enc]) {
+            wprintf(L" verified10=%ls/%ls", info->pix_fmt10[enc], info->profile10[enc]);
+        }
         wprintf(L"\n");
     }
     wprintf(L"best8=%ls best10=%ls recommended=%ls hdr=%ls\n\n",

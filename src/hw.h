@@ -70,6 +70,9 @@ typedef struct {
     int enc_listed[HW_ENC_COUNT];
     int enc_ok8[HW_ENC_COUNT];
     int enc_ok10[HW_ENC_COUNT];
+    int enc_10bit_verified[HW_ENC_COUNT];
+    wchar_t pix_fmt10[HW_ENC_COUNT][32];
+    wchar_t profile10[HW_ENC_COUNT][64];
 
     double speed8_median[HW_ENC_COUNT];
     double speed8_min[HW_ENC_COUNT];
@@ -118,6 +121,7 @@ double hw_best_gpu_speed8(const HwInfo *info);
 const wchar_t *hw_profile_name(int profile);
 const wchar_t *hw_encoder_name(int encoder);
 int hw_encoder_is_gpu(int encoder);
+int hw_fallback_encoder(int failed_encoder);
 
 int hw_load(HwInfo *info);
 int hw_save(const HwInfo *info);

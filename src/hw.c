@@ -10,12 +10,14 @@
 #include <string.h>
 #include <wchar.h>
 #include <wctype.h>
+#include <ctype.h>
+#include <math.h>
 
 #define HW_REG_KEY      L"Software\\ff-compressor"
 #define HW_TEST_WIDTH   1920
 #define HW_TEST_HEIGHT  1080
 #define HW_TEST_FPS     30
-#define HW_TEST_SECONDS 1
+#define HW_TEST_SECONDS 3
 #define HW_WARMUPS      1
 #define HW_RUNS         3
 #define HW_RUN_TIMEOUT  30000u
@@ -142,6 +144,7 @@ int hw_load(HwInfo *info)
     info->physical_cores = (int)reg_get_dword(key, L"HwPhysicalCores", 0);
     info->gpu_vendor = reg_get_dword(key, L"HwGpuVendor", 0);
     info->gpu_memory_mb = reg_get_dword(key, L"HwGpuMemoryMB", 0);
+    info->total_seconds = (double)reg_get_dword(key, L"HwTotalSeconds", 0);
     info->best8 = (int)reg_get_dword(key, L"HwBest8", 0xFFFFFFFFu);
     info->best10 = (int)reg_get_dword(key, L"HwBest10", 0xFFFFFFFFu);
     info->recommended = (int)reg_get_dword(key, L"HwRecommended", 0xFFFFFFFFu);
@@ -151,6 +154,28 @@ int hw_load(HwInfo *info)
     reg_get_sz(key, L"HwCpuName", info->cpu_name, 128);
     reg_get_sz(key, L"HwFfmpeg", info->ffmpeg_version, 128);
     reg_get_sz(key, L"HwTestedAt", info->tested_at, 32);
+    {
+        int enc;
+        for (enc = 0; enc < HW_ENC_COUNT; enc++) {
+            wchar_t name[64];
+            _snwprintf(name, 64, L"HwListed_%d", enc);
+            info->enc_listed[enc] = (int)reg_get_dword(key, name, 0);
+            _snwprintf(name, 64, L"HwOk8_%d", enc);
+            info->enc_ok8[enc] = (int)reg_get_dword(key, name, 0);
+            _snwprintf(name, 64, L"HwOk10_%d", enc);
+            info->enc_ok10[enc] = (int)reg_get_dword(key, name, 0);
+            _snwprintf(name, 64, L"HwVerified10_%d", enc);
+            info->enc_10bit_verified[enc] = (int)reg_get_dword(key, name, 0);
+            _snwprintf(name, 64, L"HwSpeed8_%d", enc);
+            info->speed8_median[enc] = (double)reg_get_dword(key, name, 0) / 100.0;
+            _snwprintf(name, 64, L"HwSpeed10_%d", enc);
+            info->speed10_median[enc] = (double)reg_get_dword(key, name, 0) / 100.0;
+            _snwprintf(name, 64, L"HwPix10_%d", enc);
+            reg_get_sz(key, name, info->pix_fmt10[enc], 32);
+            _snwprintf(name, 64, L"HwProfile10_%d", enc);
+            reg_get_sz(key, name, info->profile10[enc], 64);
+        }
+    }
     RegCloseKey(key);
 
     if (info->test_version != HW_TEST_VERSION) return 0;
@@ -188,6 +213,31 @@ int hw_save(const HwInfo *info)
     reg_set_sz(key, L"HwCpuName", info->cpu_name);
     reg_set_sz(key, L"HwFfmpeg", info->ffmpeg_version);
     reg_set_sz(key, L"HwTestedAt", info->tested_at);
+    if (!info->skipped) {
+        int enc;
+        for (enc = 0; enc < HW_ENC_COUNT; enc++) {
+            wchar_t name[64];
+            _snwprintf(name, 64, L"HwListed_%d", enc);
+            reg_set_dword(key, name, (DWORD)info->enc_listed[enc]);
+            _snwprintf(name, 64, L"HwOk8_%d", enc);
+            reg_set_dword(key, name, (DWORD)info->enc_ok8[enc]);
+            _snwprintf(name, 64, L"HwOk10_%d", enc);
+            reg_set_dword(key, name, (DWORD)info->enc_ok10[enc]);
+            _snwprintf(name, 64, L"HwVerified10_%d", enc);
+            reg_set_dword(key, name, (DWORD)info->enc_10bit_verified[enc]);
+            _snwprintf(name, 64, L"HwSpeed8_%d", enc);
+            reg_set_dword(key, name, (DWORD)(info->speed8_median[enc] * 100.0 + 0.5));
+            _snwprintf(name, 64, L"HwSpeed10_%d", enc);
+            reg_set_dword(key, name, (DWORD)(info->speed10_median[enc] * 100.0 + 0.5));
+            _snwprintf(name, 64, L"HwPix10_%d", enc);
+            reg_set_sz(key, name, info->pix_fmt10[enc]);
+            _snwprintf(name, 64, L"HwProfile10_%d", enc);
+            reg_set_sz(key, name, info->profile10[enc]);
+        }
+    }
+    if (!info->skipped && info->total_seconds > 0.0) {
+        reg_set_dword(key, L"HwTotalSeconds", (DWORD)(info->total_seconds + 0.5));
+    }
     RegCloseKey(key);
     return 1;
 }
@@ -476,6 +526,12 @@ int hw_encoder_is_gpu(int encoder)
     return encoder >= HW_ENC_NVENC && encoder <= HW_ENC_AMF;
 }
 
+int hw_fallback_encoder(int failed_encoder)
+{
+    if (failed_encoder == HW_ENC_X265) return -1;
+    return HW_ENC_X265;
+}
+
 double hw_best_gpu_speed8(const HwInfo *info)
 {
     double best = 0.0;
@@ -579,13 +635,97 @@ const wchar_t *hw_encoder_name(int encoder)
 }
 
 /* ------------------------------------------------------------ test driver */
+static int contains_ci(const char *haystack, const char *needle)
+{
+    char h[256];
+    char n[64];
+    size_t i;
+    if (!haystack || !needle) return 0;
+    for (i = 0; i + 1 < sizeof(h) && haystack[i]; i++) h[i] = (char)tolower((unsigned char)haystack[i]);
+    h[i] = '\0';
+    for (i = 0; i + 1 < sizeof(n) && needle[i]; i++) n[i] = (char)tolower((unsigned char)needle[i]);
+    n[i] = '\0';
+    return strstr(h, n) != NULL;
+}
+
+static void make_10bit_temp(int enc, wchar_t *out, size_t cap)
+{
+    wchar_t base[UTIL_PATH_MAX];
+    wchar_t dir[UTIL_PATH_MAX];
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    util_get_temp_dir(base, UTIL_PATH_MAX);
+    _snwprintf(dir, UTIL_PATH_MAX, L"%lsff-compressor\\hwtest", base);
+    dir[UTIL_PATH_MAX - 1] = L'\0';
+    SHCreateDirectoryExW(NULL, dir, NULL);
+    _snwprintf(out, cap, L"%ls\\hw10_%d.mp4", dir, enc);
+    out[cap - 1] = L'\0';
+    DeleteFileW(out);
+}
+
+static int verify_10bit_file(const wchar_t *path, wchar_t *pix_out, size_t pix_cap,
+                             wchar_t *profile_out, size_t profile_cap)
+{
+    wchar_t ffprobe[UTIL_PATH_MAX];
+    wchar_t q_tool[UTIL_PATH_MAX + 4];
+    wchar_t q_path[UTIL_PATH_MAX + 4];
+    wchar_t cmd[UTIL_PATH_MAX * 2 + 128];
+    char *buf = NULL;
+    size_t len = 0;
+    DWORD code = 0;
+    char pix[64] = "";
+    char profile[64] = "";
+    char *line;
+
+    if (pix_out && pix_cap) pix_out[0] = L'\0';
+    if (profile_out && profile_cap) profile_out[0] = L'\0';
+    if (!util_find_tool(L"ffprobe", ffprobe, UTIL_PATH_MAX)) return 0;
+    if (!util_quote_arg(q_tool, sizeof(q_tool) / sizeof(wchar_t), ffprobe)) return 0;
+    if (!util_quote_arg(q_path, sizeof(q_path) / sizeof(wchar_t), path)) return 0;
+
+    _snwprintf(cmd, sizeof(cmd) / sizeof(wchar_t),
+        L"%ls -v error -select_streams v:0 -show_entries stream=pix_fmt,profile "
+        L"-of default=nw=1 %ls", q_tool, q_path);
+    cmd[(sizeof(cmd) / sizeof(wchar_t)) - 1] = L'\0';
+
+    if (util_run_capture(cmd, 15000, NULL, &buf, &len, &code) != UTIL_RUN_OK ||
+        code != 0 || len == 0) {
+        free(buf);
+        return 0;
+    }
+
+    line = strtok(buf, "\r\n");
+    while (line) {
+        if (strncmp(line, "pix_fmt=", 8) == 0) {
+            strncpy(pix, line + 8, sizeof(pix) - 1);
+            pix[sizeof(pix) - 1] = '\0';
+        } else if (strncmp(line, "profile=", 8) == 0) {
+            strncpy(profile, line + 8, sizeof(profile) - 1);
+            profile[sizeof(profile) - 1] = '\0';
+        }
+        line = strtok(NULL, "\r\n");
+    }
+    free(buf);
+
+    if (pix_out) copy_utf8(pix, pix_out, pix_cap);
+    if (profile_out) copy_utf8(profile, profile_out, profile_cap);
+
+    if (!(strstr(pix, "10") || strstr(pix, "p010") || strstr(pix, "p016"))) return 0;
+    if (!(contains_ci(profile, "main 10") || contains_ci(profile, "main10"))) return 0;
+    return 1;
+}
+
 static int build_test_cmd(const wchar_t *ffmpeg, int enc, int bit_depth,
-                          wchar_t *cmd, size_t cap)
+                          const wchar_t *out_path, wchar_t *cmd, size_t cap)
 {
     wchar_t q[UTIL_PATH_MAX + 4];
+    wchar_t q_out[UTIL_PATH_MAX + 4];
     const wchar_t *args = NULL;
 
     if (!util_quote_arg(q, sizeof(q) / sizeof(wchar_t), ffmpeg)) return 0;
+    if (bit_depth == 10) {
+        if (!out_path || !util_quote_arg(q_out, sizeof(q_out) / sizeof(wchar_t), out_path)) return 0;
+    }
 
     if (enc == HW_ENC_X265) {
         if (bit_depth != 8) return 0;
@@ -606,17 +746,27 @@ static int build_test_cmd(const wchar_t *ffmpeg, int enc, int bit_depth,
         return 0;
     }
 
-    _snwprintf(cmd, cap,
-        L"%ls -hide_banner -loglevel error -nostats -progress pipe:1 "
-        L"-f lavfi -i \"testsrc2=size=%dx%d:rate=%d:duration=%d\" "
-        L"%ls -an -sn -dn -t %d -f null NUL",
-        q, HW_TEST_WIDTH, HW_TEST_HEIGHT, HW_TEST_FPS, HW_TEST_SECONDS,
-        args, HW_TEST_SECONDS);
+    if (bit_depth == 10) {
+        _snwprintf(cmd, cap,
+            L"%ls -hide_banner -loglevel error -nostats -progress pipe:1 "
+            L"-f lavfi -i \"testsrc2=size=%dx%d:rate=%d:duration=%d\" "
+            L"%ls -an -sn -dn -t %d -f mp4 -y %ls",
+            q, HW_TEST_WIDTH, HW_TEST_HEIGHT, HW_TEST_FPS, HW_TEST_SECONDS,
+            args, HW_TEST_SECONDS, q_out);
+    } else {
+        _snwprintf(cmd, cap,
+            L"%ls -hide_banner -loglevel error -nostats -progress pipe:1 "
+            L"-f lavfi -i \"testsrc2=size=%dx%d:rate=%d:duration=%d\" "
+            L"%ls -an -sn -dn -t %d -f null NUL",
+            q, HW_TEST_WIDTH, HW_TEST_HEIGHT, HW_TEST_FPS, HW_TEST_SECONDS,
+            args, HW_TEST_SECONDS);
+    }
     cmd[cap - 1] = L'\0';
     return 1;
 }
 
 static int run_one(const wchar_t *ffmpeg, int enc, int bit_depth, int warmup,
+                   const wchar_t *out_path,
                    int *run_done, int run_total, ULONGLONG test_start,
                    HwProgressCallback cb, void *user, volatile int *cancel,
                    double *speed_out, double *wall_ms_out)
@@ -630,7 +780,7 @@ static int run_one(const wchar_t *ffmpeg, int enc, int bit_depth, int warmup,
     double speed, wall_ms;
     HwProgress p;
 
-    if (!build_test_cmd(ffmpeg, enc, bit_depth, cmd, sizeof(cmd) / sizeof(wchar_t))) {
+    if (!build_test_cmd(ffmpeg, enc, bit_depth, out_path, cmd, sizeof(cmd) / sizeof(wchar_t))) {
         return -1;
     }
 
@@ -679,16 +829,45 @@ static int test_encoder_depth(const wchar_t *ffmpeg, HwInfo *info, int enc, int 
     double walls[HW_RUNS];
     double one_speed, one_wall;
     int ok;
+    wchar_t temp[UTIL_PATH_MAX];
+    const wchar_t *out_path = NULL;
+
+    temp[0] = L'\0';
+    if (bit_depth == 10) {
+        make_10bit_temp(enc, temp, UTIL_PATH_MAX);
+        if (!temp[0]) return 0;
+        out_path = temp;
+    }
 
     /* Warm-up, not measured. */
-    r = run_one(ffmpeg, enc, bit_depth, 1, run_done, run_total, test_start,
+    r = run_one(ffmpeg, enc, bit_depth, 1, out_path, run_done, run_total, test_start,
                 cb, user, cancel, NULL, NULL);
-    if (r == -2) return -2;
-    if (r != 0) return 0;
+    if (r == -2) {
+        if (temp[0]) DeleteFileW(temp);
+        return -2;
+    }
+    if (r != 0) {
+        if (temp[0]) DeleteFileW(temp);
+        return 0;
+    }
+
+    if (bit_depth == 10) {
+        wchar_t pix[32];
+        wchar_t profile[64];
+        if (!verify_10bit_file(temp, pix, 32, profile, 64)) {
+            DeleteFileW(temp);
+            return 0;
+        }
+        wcsncpy(info->pix_fmt10[enc], pix, 31);
+        info->pix_fmt10[enc][31] = L'\0';
+        wcsncpy(info->profile10[enc], profile, 63);
+        info->profile10[enc][63] = L'\0';
+        info->enc_10bit_verified[enc] = 1;
+    }
 
     ok = 1;
     for (r = 0; r < HW_RUNS; r++) {
-        if (run_one(ffmpeg, enc, bit_depth, 0, run_done, run_total, test_start,
+        if (run_one(ffmpeg, enc, bit_depth, 0, out_path, run_done, run_total, test_start,
                     cb, user, cancel, &one_speed, &one_wall) != 0) {
             ok = 0;
             break;
@@ -696,7 +875,10 @@ static int test_encoder_depth(const wchar_t *ffmpeg, HwInfo *info, int enc, int 
         speeds[r] = one_speed;
         walls[r] = one_wall;
     }
-    if (!ok) return 0;
+    if (!ok) {
+        if (temp[0]) DeleteFileW(temp);
+        return 0;
+    }
 
     {
         double med = median_of(speeds, HW_RUNS);
@@ -725,6 +907,7 @@ static int test_encoder_depth(const wchar_t *ffmpeg, HwInfo *info, int enc, int 
             for (i = 0; i < HW_RUNS; i++) info->speed10_runs[enc][i] = speeds[i];
         }
     }
+    if (temp[0]) DeleteFileW(temp);
     return 1;
 }
 
@@ -858,8 +1041,9 @@ cancelled:
 void hw_test_settings_text(wchar_t *out, size_t cap)
 {
     static const wchar_t *text_value =
-        L"source=testsrc2 " L"1920x1080@30, 1 s, 8-bit yuv420p / 10-bit p010le; "
-        L"warmup=1; measured=3; median; output=-f null NUL\n"
+        L"source=testsrc2 " L"1920x1080@30, 3 s, 8-bit yuv420p / 10-bit p010le; "
+        L"warmup=1; measured=3; median; 8-bit output=-f null NUL; "
+        L"10-bit output=temp mp4, ffprobe-verified pix_fmt/profile\n"
         L"  x265 8-bit : libx265 -preset medium -crf 26 -x265-params log-level=error -pix_fmt yuv420p\n"
         L"  NVENC 8-bit: hevc_nvenc -preset p5 -tune hq -rc vbr -cq 28 -b:v 0 -pix_fmt yuv420p\n"
         L"  NVENC 10-bit: hevc_nvenc ... -pix_fmt p010le -profile:v main10\n"
@@ -870,6 +1054,51 @@ void hw_test_settings_text(wchar_t *out, size_t cap)
     if (!out || cap == 0) return;
     wcsncpy(out, text_value, cap - 1);
     out[cap - 1] = L'\0';
+}
+
+static const wchar_t *encoder_hardware_note(const HwInfo *info, int enc)
+{
+    if (!info) return L"unknown";
+    if (info->enc_ok8[enc]) return L"tested_on_hardware";
+    if (enc == HW_ENC_NVENC) {
+        return (info->gpu_vendor == 0x10DE) ? L"tested_failed" : L"untested_on_hardware";
+    }
+    if (enc == HW_ENC_QSV) {
+        return (info->gpu_vendor == 0x8086) ? L"tested_failed" : L"untested_on_hardware";
+    }
+    if (enc == HW_ENC_AMF) {
+        return (info->gpu_vendor == 0x1002) ? L"tested_failed" : L"untested_on_hardware";
+    }
+    return L"cpu";
+}
+
+static void log_near_boundaries(FILE *f, const HwInfo *info)
+{
+    double gpu = hw_best_gpu_speed8(info);
+    double x265 = info->speed8_median[HW_ENC_X265];
+    int threads = info->logical_cores;
+
+    if (fabs(x265 - 1.0) <= 0.15) {
+        fwprintf(f, L"near_boundary=Light x265 1.0x, measured %.3fx (15%% window 0.85..1.15)\n", x265);
+    }
+    if (gpu > 0.0 && fabs(gpu - 3.0) <= 0.45) {
+        fwprintf(f, L"near_boundary=Light GPU 3.0x, measured %.3fx (15%% window 2.55..3.45)\n", gpu);
+    }
+    if (gpu > 0.0 && fabs(gpu - 25.0) <= 3.75) {
+        fwprintf(f, L"near_boundary=Thorough GPU 25.0x, measured %.3fx (15%% window 21.25..28.75)\n", gpu);
+    }
+    if (fabs(x265 - 3.0) <= 0.45) {
+        fwprintf(f, L"near_boundary=Thorough x265 3.0x, measured %.3fx (15%% window 2.55..3.45)\n", x265);
+    }
+    if (threads >= 3 && threads <= 5) {
+        fwprintf(f, L"near_boundary=Light threads 4, measured %d\n", threads);
+    }
+    if (threads >= 7 && threads <= 9) {
+        fwprintf(f, L"near_boundary=Thorough threads 8, measured %d\n", threads);
+    }
+    if (threads >= 11 && threads <= 13) {
+        fwprintf(f, L"near_boundary=Thorough threads 12, measured %d\n", threads);
+    }
 }
 
 void hw_log_result(const HwInfo *info)
@@ -904,8 +1133,9 @@ void hw_log_result(const HwInfo *info)
     fwprintf(f, L"encoders:\n");
     for (enc = 0; enc < HW_ENC_COUNT; enc++) {
         int i;
-        fwprintf(f, L"  %ls listed=%d ok8=%d ok10=%d\n",
-                 hw_encoder_name(enc), info->enc_listed[enc], info->enc_ok8[enc], info->enc_ok10[enc]);
+        fwprintf(f, L"  %ls listed=%d ok8=%d ok10=%d hardware=%ls\n",
+                 hw_encoder_name(enc), info->enc_listed[enc], info->enc_ok8[enc],
+                 info->enc_ok10[enc], encoder_hardware_note(info, enc));
         if (info->enc_ok8[enc]) {
             fwprintf(f, L"    runs8=");
             for (i = 0; i < info->speed8_run_count[enc]; i++) {
@@ -924,7 +1154,12 @@ void hw_log_result(const HwInfo *info)
                      info->speed10_median[enc], info->speed10_min[enc], info->speed10_max[enc],
                      info->wall10_median_ms[enc]);
         }
+        if (info->enc_10bit_verified[enc]) {
+            fwprintf(f, L"    10bit_verified=1 pix_fmt=%ls profile=%ls\n",
+                     info->pix_fmt10[enc], info->profile10[enc]);
+        }
     }
+    log_near_boundaries(f, info);
     fwprintf(f, L"best8=%ls best10=%ls recommended=%ls hdr=%ls\n",
              hw_encoder_name(info->best8), hw_encoder_name(info->best10),
              hw_encoder_name(info->recommended), hw_encoder_name(info->hdr_encoder));

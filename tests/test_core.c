@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "probe.h"
 #include "hw.h"
+#include "presets.h"
+#include "estimate.h"
 #include "strings.h"
 #include "util.h"
 
@@ -296,6 +298,78 @@ static void test_hw_profiles(void)
 
     CHECK(wcscmp(hw_profile_name(HW_PROFILE_BALANCED), L"BALANCED") == 0, "profile name");
     CHECK(wcscmp(hw_encoder_name(HW_ENC_AMF), L"AMD AMF") == 0, "encoder name");
+    CHECK(hw_fallback_encoder(HW_ENC_NVENC) == HW_ENC_X265, "NVENC failure falls back to x265");
+    CHECK(hw_fallback_encoder(HW_ENC_QSV) == HW_ENC_X265, "QSV failure falls back to x265");
+    CHECK(hw_fallback_encoder(HW_ENC_AMF) == HW_ENC_X265, "AMF failure falls back to x265");
+    CHECK(hw_fallback_encoder(HW_ENC_X265) == -1, "x265 failure has no fallback");
+}
+
+static void test_estimates(void)
+{
+    SourceInfo src;
+    HwInfo hw;
+    int levels[4], count, clips;
+    double clip_sec;
+    wchar_t args[1024];
+    wchar_t cmd[4096];
+    int fell_back = 0;
+
+    memset(&src, 0, sizeof(src));
+    src.duration = 30.0;
+    src.bit_depth = 8;
+    src.audio_track_count = 1;
+    src.audio_bitrate = 128000;
+
+    hw_info_init(&hw);
+    hw.profile = HW_PROFILE_BALANCED;
+    hw.recommended = HW_ENC_AMF;
+    hw.best8 = HW_ENC_AMF;
+    hw.enc_ok8[HW_ENC_AMF] = 1;
+    hw.speed8_median[HW_ENC_AMF] = 10.0;
+
+    count = estimate_plan(&src, HW_PROFILE_BALANCED, levels, &count, &clips, &clip_sec);
+    CHECK(count == 4 && clips == 3, "Balanced plan is 4 levels x 3 clips");
+    CHECK(clip_sec > 3.9 && clip_sec < 4.1, "Balanced clip is 4 s");
+
+    count = estimate_plan(&src, HW_PROFILE_LIGHT, levels, &count, &clips, &clip_sec);
+    CHECK(count == 3 && clips == 2, "Light plan is 3 levels x 2 clips");
+    CHECK(clip_sec > 2.9 && clip_sec < 3.1, "Light clip is 3 s");
+
+    count = estimate_plan(&src, HW_PROFILE_THOROUGH, levels, &count, &clips, &clip_sec);
+    CHECK(count == 4 && clips == 4, "Thorough plan is 4 levels x 4 clips");
+
+    CHECK(estimate_choose_encoder(&src, &hw) == HW_ENC_AMF, "estimate chooses AMF");
+    CHECK(estimate_next_encoder(HW_ENC_NVENC, 1, &fell_back) == HW_ENC_X265,
+          "estimate falls back from NVENC");
+    CHECK(fell_back == 1, "estimate records fallback");
+    fell_back = 0;
+    CHECK(estimate_next_encoder(HW_ENC_X265, 1, &fell_back) == -1,
+          "estimate has no fallback from x265");
+
+    CHECK(presets_video_args(&src, HW_ENC_AMF, QUALITY_BALANCED, args, 1024) == 1,
+          "AMF args build");
+    CHECK(wcsstr(args, L"hevc_amf") != NULL, "AMF args use hevc_amf");
+    CHECK(wcsstr(args, L"-qp_i 30") != NULL, "AMF Balanced uses QP 30");
+    src.bit_depth = 10;
+    CHECK(presets_video_args(&src, HW_ENC_AMF, QUALITY_BALANCED, args, 1024) == 1,
+          "AMF 10-bit args build");
+    CHECK(wcsstr(args, L"p010le") != NULL, "AMF 10-bit uses p010le");
+    src.is_hdr = 1;
+    src.bit_depth = 10;
+    wcscpy(src.color_primaries, L"bt2020");
+    wcscpy(src.color_transfer, L"smpte2084");
+    wcscpy(src.color_space, L"bt2020nc");
+    wcscpy(src.color_range, L"tv");
+    CHECK(presets_video_args(&src, HW_ENC_X265, QUALITY_BALANCED, args, 1024) == 1,
+          "x265 HDR args build");
+    CHECK(wcsstr(args, L"hdr10=1") != NULL, "x265 HDR adds hdr10");
+
+    src.duration = 30.0;
+    wcscpy(src.path, L"tests\\media\\h264_1080p_20s.mp4");
+    CHECK(presets_build_sample_cmd(&src, HW_ENC_AMF, QUALITY_BALANCED, 3.0, 4.0,
+                                   L"tests\\build\\sample.mkv", cmd, 4096) == 1,
+          "sample command builds");
+    CHECK(wcsstr(cmd, L"-ss 3.000") != NULL, "sample command seeks");
 }
 
 static void test_strings_and_utils(void)
@@ -356,6 +430,7 @@ int main(void)
     test_opus_webm();
     test_no_video_and_bad_json();
     test_hw_profiles();
+    test_estimates();
     test_strings_and_utils();
 
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

@@ -3,6 +3,8 @@
 #include "engine.h"
 #include "hw.h"
 #include "probe.h"
+#include "presets.h"
+#include "estimate.h"
 #include "strings.h"
 #include "util.h"
 #include "gb_ui.h"
@@ -32,6 +34,10 @@
 #define IDC_BTN_RETEST   3006
 #define IDC_BTN_DEPTH    3007
 #define IDC_BTN_SKIP     3008
+#define IDC_BTN_BACK     3009
+#define IDC_BTN_TESTAGAIN 3010
+#define IDC_BTN_QCANCEL  3011
+#define IDC_BTN_COMPRESS 3012
 
 #define BASE_CLIENT_W 646
 #define BASE_CLIENT_H 485
@@ -55,6 +61,10 @@ static HWND g_hBtnClose = NULL;
 static HWND g_hBtnRetest = NULL;
 static HWND g_hBtnDepth = NULL;
 static HWND g_hBtnSkip = NULL;
+static HWND g_hBtnBack = NULL;
+static HWND g_hBtnTestAgain = NULL;
+static HWND g_hBtnQCancel = NULL;
+static HWND g_hBtnCompress = NULL;
 
 static HFONT g_fontTitle = NULL;
 static HFONT g_fontBold = NULL;
@@ -89,10 +99,24 @@ static int g_hw_override = HW_PROFILE_AUTO;
 static HwProgress g_hw_progress;
 static HwError g_hw_error = HW_ERR_NONE;
 static ULONGLONG g_hw_start_tick = 0;
-static int g_hw_est_seconds = 20;
+static int g_hw_est_seconds = 30;
 static volatile int g_hw_cancel = 0;
 static wchar_t g_hw_pending_path[UTIL_PATH_MAX];
 static wchar_t g_depth_items[4][32];
+
+static int g_step = 0; /* 0 = video, 1 = quality */
+static int g_quality_selected = QUALITY_BALANCED;
+static int g_quality_testing = 0;
+static int g_quality_has_result = 0;
+static int g_quality_gen = 0;
+static EstimateSet g_est;
+static EstimateProgress g_est_progress;
+static int g_est_seconds = 10;
+static double g_quality_last_seconds = 0.0;
+static ULONGLONG g_est_start_tick = 0;
+static volatile int g_est_cancel = 0;
+static RECT g_rc_cards[ESTIMATE_MAX_LEVELS];
+static int g_card_count = 0;
 
 typedef struct {
     ProbeError error;
@@ -104,6 +128,17 @@ typedef struct {
     HwInfo info;
 } HwDoneMsg;
 
+typedef struct {
+    int gen;
+    EstimateResult result;
+    EstimateSet est;
+} EstimateDoneMsg;
+
+typedef struct {
+    int gen;
+    EstimateProgress progress;
+} EstProgressMsg;
+
 static void layout_controls(void);
 static void update_controls_visibility(void);
 static void start_probe(HWND hWnd, const wchar_t *path);
@@ -111,6 +146,11 @@ static void set_status_text(const wchar_t *s, int is_error);
 static void hw_ui_start(HWND hWnd, int auto_test, const wchar_t *pending_path);
 static void hw_ui_update_depth_label(void);
 static void hw_ui_open_depth_dropdown(void);
+static void quality_ui_start(HWND hWnd, int force);
+static void quality_ui_update_selection(void);
+static void quality_ui_reset(void);
+static int quality_current_profile(void);
+static EstimateLevel *quality_level_result(int level);
 
 static int S(int value)
 {
@@ -443,13 +483,13 @@ static void draw_steps(HDC hdc, int client_w)
     int w = (client_w - S(40) - gap * 2) / 3;
 
     r.left = x; r.top = y; r.right = x + w; r.bottom = y + h;
-    draw_step_tab(hdc, &r, text(STR_STEP_VIDEO), 1);
+    draw_step_tab(hdc, &r, text(STR_STEP_VIDEO), g_step == 0);
     x += w + gap;
     r.left = x; r.right = x + w;
-    draw_step_tab(hdc, &r, text(STR_STEP_QUALITY), 0);
+    draw_step_tab(hdc, &r, text(STR_STEP_QUALITY), g_step == 1);
     x += w + gap;
     r.left = x; r.right = x + w;
-    draw_step_tab(hdc, &r, text(STR_STEP_COMPRESS), 0);
+    draw_step_tab(hdc, &r, text(STR_STEP_COMPRESS), g_step == 2);
 }
 
 static void draw_status_strip(HDC hdc)
@@ -861,6 +901,218 @@ static void draw_hw_test(HDC hdc)
             DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
+static void draw_quality(HDC hdc)
+{
+    wchar_t buf[512];
+    wchar_t size_lo[64], size_hi[64], time_lo[64], time_hi[64];
+    wchar_t size_mid[64], time_mid[64];
+    RECT tr;
+    int levels[ESTIMATE_MAX_LEVELS];
+    int count;
+    int i;
+    int x = S(32), y = S(140), gap = S(8), card_h = S(140);
+    int card_w;
+
+    count = g_est.level_count;
+    if (count <= 0) {
+        count = presets_available_levels(quality_current_profile(), levels);
+    } else {
+        for (i = 0; i < count; i++) levels[i] = g_est.levels_used[i];
+    }
+    if (count <= 0) count = 1;
+    card_w = (S(582) - gap * (count - 1)) / count;
+    g_card_count = count;
+
+    SetRect(&tr, S(32), S(110), S(614), S(132));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &tr, text(STR_QUALITY_HEADING),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    for (i = 0; i < count; i++) {
+        RECT r;
+        EstimateLevel *e = NULL;
+        int level = levels[i];
+        int selected = (level == g_quality_selected);
+        COLORREF ink = selected ? GB_LIGHTEST : GB_DARKEST;
+
+        r.left = x + i * (card_w + gap);
+        r.top = y;
+        r.right = r.left + card_w;
+        r.bottom = y + card_h;
+        g_rc_cards[i] = r;
+
+        gb_fill_round(hdc, &r, selected ? GB_DARKEST : GB_LIGHTEST, GB_LIGHTEST);
+        gb_frame_round(hdc, &r, GB_DARKEST, S(2), GB_LIGHTEST,
+                       selected ? GB_DARKEST : GB_LIGHTEST, 0);
+
+        {
+            RECT nr = { r.left + S(8), r.top + S(8), r.right - S(8), r.top + S(30) };
+            gb_text(hdc, g_fontBold, ink, &nr, presets_level_name(level),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        {
+            RECT nr = { r.left + S(8), r.top + S(30), r.right - S(8), r.top + S(48) };
+            gb_text(hdc, g_fontSmall, ink, &nr, presets_level_note(level),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+
+        if (g_quality_has_result) e = quality_level_result(level);
+        if (e && e->available) {
+            util_format_bytes((long long)e->est_size_bytes, size_mid, 64);
+            util_format_duration(e->est_seconds, time_mid, 64);
+            {
+                RECT sr = { r.left + S(8), r.top + S(54), r.right - S(8), r.top + S(76) };
+                _snwprintf(buf, 512, text(STR_QUALITY_SIZE_FMT), size_mid);
+                buf[511] = L'\0';
+                gb_text(hdc, g_fontBold, ink, &sr, buf,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            {
+                RECT trr = { r.left + S(8), r.top + S(78), r.right - S(8), r.top + S(96) };
+                _snwprintf(buf, 512, text(STR_QUALITY_TIME_FMT), time_mid);
+                buf[511] = L'\0';
+                gb_text(hdc, g_fontSmall, ink, &trr, buf,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            if (g_info.file_size > 0 && e->est_size_bytes > 0.0) {
+                int save = (int)((1.0 - e->est_size_bytes / (double)g_info.file_size) * 100.0);
+                if (e->est_size_bytes > (double)g_info.file_size) {
+                    wcsncpy(buf, text(STR_QUALITY_LARGER), 511);
+                } else if (save < 5) {
+                    wcsncpy(buf, text(STR_QUALITY_SAME_SIZE), 511);
+                } else {
+                    if (save > 99) save = 99;
+                    _snwprintf(buf, 512, text(STR_QUALITY_SAVINGS_FMT), save);
+                }
+                buf[511] = L'\0';
+                {
+                    RECT sr = { r.left + S(8), r.top + S(98), r.right - S(8), r.top + S(116) };
+                    gb_text(hdc, g_fontSmall, ink, &sr, buf,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+                }
+            }
+        } else {
+            RECT nr = { r.left + S(8), r.top + S(60), r.right - S(8), r.top + S(110) };
+            gb_text(hdc, g_fontSmall, ink, &nr, text(STR_QUALITY_NO_ESTIMATE),
+                    DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+        }
+
+        if (level == QUALITY_BALANCED) {
+            RECT rr = { r.left + S(8), r.bottom - S(24), r.right - S(8), r.bottom - S(8) };
+            gb_text(hdc, g_fontSmallBold, ink, &rr, text(STR_QUALITY_RECOMMENDED),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+    }
+
+    /* Selected summary and notes. */
+    {
+        EstimateLevel *sel = quality_level_result(g_quality_selected);
+        int enc = g_quality_has_result ? g_est.encoder
+                                       : estimate_choose_encoder(&g_info, &g_hw_info);
+        RECT sr = { S(32), S(288), S(614), S(306) };
+        if (sel && sel->available) {
+            wchar_t left[128], right[128];
+            util_format_bytes((long long)sel->est_size_min, size_lo, 64);
+            util_format_bytes((long long)sel->est_size_max, size_hi, 64);
+            util_format_duration(sel->est_seconds_min, time_lo, 64);
+            util_format_duration(sel->est_seconds_max, time_hi, 64);
+            _snwprintf(buf, 512, L"%ls  ", presets_level_name(g_quality_selected));
+            buf[511] = L'\0';
+            _snwprintf(left, 128, text(STR_QUALITY_RANGE_FMT), size_lo, size_hi);
+            left[127] = L'\0';
+            _snwprintf(right, 128, text(STR_QUALITY_RANGE_FMT), time_lo, time_hi);
+            right[127] = L'\0';
+            _snwprintf(buf, 512, L"%ls  %ls  /  about %ls",
+                       presets_level_name(g_quality_selected), left, right);
+            buf[511] = L'\0';
+        } else {
+            wcsncpy(buf, text(STR_QUALITY_NO_ESTIMATE), 511);
+            buf[511] = L'\0';
+        }
+        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        _snwprintf(buf, 512, text(STR_QUALITY_ENCODER_FMT), hw_encoder_name(enc));
+        buf[511] = L'\0';
+        SetRect(&sr, S(32), S(306), S(614), S(322));
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        SetRect(&sr, S(32), S(322), S(614), S(348));
+        gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_COMPAT),
+                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+        SetRect(&sr, S(32), S(348), S(614), S(362));
+        gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_AUDIO_NOTE),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        SetRect(&sr, S(32), S(362), S(614), S(376));
+        if (g_est.used_fallback) {
+            gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, text(STR_QUALITY_FALLBACK),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        } else if (is_efficient(&g_info)) {
+            gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, text(STR_QUALITY_EFFICIENT),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+    }
+}
+
+static void draw_quality_progress(HDC hdc)
+{
+    wchar_t buf[512];
+    RECT tr;
+    RECT bar;
+    int percent = 0;
+    int elapsed = (int)((GetTickCount64() - g_est_start_tick) / 1000);
+
+    SetRect(&tr, S(32), S(112), S(614), S(156));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &tr, text(STR_QUALITY_HEADING),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    if (g_quality_last_seconds > 0.0) {
+        _snwprintf(buf, 512, text(STR_QUALITY_ABOUT_LAST_FMT), g_est_seconds);
+    } else {
+        int low = (int)((double)g_est_seconds * 0.8);
+        int high = (int)((double)g_est_seconds * 2.0);
+        if (low < 3) low = 3;
+        if (high < low + 3) high = low + 3;
+        _snwprintf(buf, 512, text(STR_QUALITY_ABOUT_RANGE_FMT), low, high);
+    }
+    buf[511] = L'\0';
+    SetRect(&tr, S(32), S(160), S(614), S(180));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &tr, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    if (g_est_progress.level_total > 0) {
+        _snwprintf(buf, 512, text(STR_QUALITY_TESTING_FMT),
+                   hw_encoder_name(g_est.encoder),
+                   presets_level_name(g_est_progress.level),
+                   g_est_progress.clip_index, g_est_progress.clip_total);
+        buf[511] = L'\0';
+        percent = ((g_est_progress.level_index * g_est_progress.clip_total) +
+                   g_est_progress.clip_index) * 100 /
+                  (g_est_progress.level_total * g_est_progress.clip_total);
+    } else {
+        wcsncpy(buf, text(STR_STATUS_QUALITY_TESTING), 511);
+        buf[511] = L'\0';
+    }
+    SetRect(&tr, S(32), S(184), S(614), S(206));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &tr, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    SetRect(&bar, S(32), S(216), S(614), S(230));
+    draw_progress_bar(hdc, &bar, percent);
+
+    _snwprintf(buf, 512, text(STR_HW_ELAPSED_FMT), elapsed);
+    buf[511] = L'\0';
+    SetRect(&tr, S(32), S(238), S(614), S(258));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &tr, buf,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&tr, S(32), S(276), S(614), S(320));
+    gb_text(hdc, g_fontSmall, GB_DARK, &tr, text(STR_QUALITY_PROGRESS_NOTE),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+}
+
 static void paint_main(HWND hWnd, HDC hdc)
 {
     RECT rc;
@@ -894,6 +1146,10 @@ static void paint_main(HWND hWnd, HDC hdc)
     if (g_hw_testing) {
         draw_panel(hdc, &g_rc_panel, text(STR_HW_PANEL));
         draw_hw_test(hdc);
+    } else if (g_step == 1) {
+        draw_panel(hdc, &g_rc_panel, text(STR_QUALITY_PANEL));
+        if (g_quality_testing) draw_quality_progress(hdc);
+        else draw_quality(hdc);
     } else {
         draw_panel(hdc, &g_rc_panel, text(STR_PANEL_VIDEO));
         if (g_probing) {
@@ -930,6 +1186,10 @@ static void layout_controls(void)
     SetWindowPos(g_hBtnDepth, NULL, S(298), S(388), S(170), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnContinue, NULL, cw - S(32) - btn_w, S(388), btn_w, btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnSkip, NULL, cw - S(32) - S(160), S(388), S(160), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnBack, NULL, S(32), S(388), S(100), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnTestAgain, NULL, S(142), S(388), S(140), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnQCancel, NULL, cw - S(32) - S(170), S(388), S(170), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnCompress, NULL, cw - S(32) - S(140), S(388), S(140), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnDetails, NULL, S(32), S(340), S(150), S(26), SWP_NOZORDER);
 
     {
@@ -955,10 +1215,40 @@ static void update_controls_visibility(void)
         ShowWindow(g_hBtnDetails, SW_HIDE);
         ShowWindow(g_hBtnRetest, SW_HIDE);
         ShowWindow(g_hBtnDepth, SW_HIDE);
+        ShowWindow(g_hBtnBack, SW_HIDE);
+        ShowWindow(g_hBtnTestAgain, SW_HIDE);
+        ShowWindow(g_hBtnQCancel, SW_HIDE);
+        ShowWindow(g_hBtnCompress, SW_HIDE);
         ShowWindow(g_hBtnSkip, SW_SHOW);
         EnableWindow(g_hBtnSkip, g_hw_skipped ? FALSE : TRUE);
+    } else if (g_step == 1) {
+        ShowWindow(g_hBtnChoose, SW_HIDE);
+        ShowWindow(g_hBtnContinue, SW_HIDE);
+        ShowWindow(g_hBtnDetails, SW_HIDE);
+        ShowWindow(g_hBtnRetest, SW_HIDE);
+        ShowWindow(g_hBtnDepth, SW_HIDE);
+        ShowWindow(g_hBtnSkip, SW_HIDE);
+        if (g_quality_testing) {
+            ShowWindow(g_hBtnBack, SW_HIDE);
+            ShowWindow(g_hBtnTestAgain, SW_HIDE);
+            ShowWindow(g_hBtnCompress, SW_HIDE);
+            ShowWindow(g_hBtnQCancel, SW_SHOW);
+            EnableWindow(g_hBtnQCancel, TRUE);
+        } else {
+            ShowWindow(g_hBtnBack, SW_SHOW);
+            ShowWindow(g_hBtnTestAgain, SW_SHOW);
+            ShowWindow(g_hBtnQCancel, SW_HIDE);
+            ShowWindow(g_hBtnCompress, SW_SHOW);
+            EnableWindow(g_hBtnBack, TRUE);
+            EnableWindow(g_hBtnTestAgain, TRUE);
+            EnableWindow(g_hBtnCompress, g_quality_has_result ? TRUE : FALSE);
+        }
     } else {
         ShowWindow(g_hBtnSkip, SW_HIDE);
+        ShowWindow(g_hBtnBack, SW_HIDE);
+        ShowWindow(g_hBtnTestAgain, SW_HIDE);
+        ShowWindow(g_hBtnQCancel, SW_HIDE);
+        ShowWindow(g_hBtnCompress, SW_HIDE);
         ShowWindow(g_hBtnChoose, SW_SHOW);
         ShowWindow(g_hBtnContinue, SW_SHOW);
         ShowWindow(g_hBtnRetest, SW_SHOW);
@@ -1004,6 +1294,8 @@ static void start_probe(HWND hWnd, const wchar_t *path)
     g_has_info = 0;
     g_probing = 1;
     g_show_details = 0;
+    g_step = 0;
+    quality_ui_reset();
     memset(&g_info, 0, sizeof(g_info));
     wcsncpy(g_pending_name, util_basename(path), 255);
     g_pending_name[255] = L'\0';
@@ -1129,7 +1421,8 @@ static void hw_ui_start(HWND hWnd, int auto_test, const wchar_t *pending_path)
     g_hw_error = HW_ERR_NONE;
     memset(&g_hw_progress, 0, sizeof(g_hw_progress));
     g_hw_start_tick = GetTickCount64();
-    g_hw_est_seconds = 20;
+    g_hw_est_seconds = (g_hw_has_info && g_hw_info.total_seconds > 0.0)
+        ? (int)(g_hw_info.total_seconds + 0.5) : 30;
     g_hw_cancel = 0;
     g_hw_pending_path[0] = L'\0';
     if (pending_path && *pending_path) {
@@ -1237,6 +1530,216 @@ static void hw_ui_on_done(HWND hWnd, HwDoneMsg *msg)
     free(msg);
 }
 
+static int quality_current_profile(void)
+{
+    if (g_hw_override != HW_PROFILE_AUTO) return g_hw_override;
+    if (g_hw_has_info && g_hw_info.profile >= 0) return g_hw_info.profile;
+    return HW_PROFILE_BALANCED;
+}
+
+static EstimateLevel *quality_level_result(int level)
+{
+    int i;
+    for (i = 0; i < g_est.level_count; i++) {
+        if (g_est.levels_used[i] == level) return &g_est.levels[i];
+    }
+    return NULL;
+}
+
+static void quality_ui_update_selection(void)
+{
+    int i;
+    int found = 0;
+    for (i = 0; i < g_est.level_count; i++) {
+        if (g_est.levels_used[i] == g_quality_selected) { found = 1; break; }
+    }
+    if (!found) {
+        g_quality_selected = g_est.level_count ? g_est.levels_used[0] : QUALITY_BALANCED;
+        for (i = 0; i < g_est.level_count; i++) {
+            if (g_est.levels_used[i] == QUALITY_BALANCED) {
+                g_quality_selected = QUALITY_BALANCED;
+                break;
+            }
+        }
+    }
+}
+
+typedef struct {
+    HWND hwnd;
+    int gen;
+} EstimateJob;
+
+static void quality_progress_cb(const EstimateProgress *p, void *user)
+{
+    EstProgressMsg *copy;
+    EstimateJob *job = (EstimateJob*)user;
+    if (!p || !job) return;
+    copy = (EstProgressMsg*)malloc(sizeof(EstProgressMsg));
+    if (!copy) return;
+    copy->gen = job->gen;
+    copy->progress = *p;
+    if (!PostMessageW(job->hwnd, WM_APP_EST_PROGRESS, 0, (LPARAM)copy)) free(copy);
+}
+
+static DWORD WINAPI quality_thread_proc(LPVOID param)
+{
+    EstimateJob *job = (EstimateJob*)param;
+    EstimateDoneMsg *msg;
+    EstimateResult result;
+
+    msg = (EstimateDoneMsg*)calloc(1, sizeof(EstimateDoneMsg));
+    if (!msg) {
+        free(job);
+        return 0;
+    }
+    msg->gen = job->gen;
+    result = estimate_run(&g_info, &g_hw_info, quality_current_profile(),
+                          &msg->est, quality_progress_cb, job, &g_est_cancel);
+    msg->result = result;
+    if (!PostMessageW(job->hwnd, WM_APP_EST_DONE, 0, (LPARAM)msg)) free(msg);
+    free(job);
+    return 0;
+}
+
+static void quality_ui_start(HWND hWnd, int force)
+{
+    EstimateJob *job;
+    HANDLE thread;
+    (void)force;
+
+    if (!g_has_info || g_quality_testing) return;
+
+    g_step = 1;
+    g_quality_testing = 1;
+    g_quality_has_result = 0;
+    g_quality_gen++;
+    g_est_cancel = 0;
+    g_est_start_tick = GetTickCount64();
+    memset(&g_est, 0, sizeof(g_est));
+    memset(&g_est_progress, 0, sizeof(g_est_progress));
+    g_est.encoder = estimate_choose_encoder(&g_info, &g_hw_info);
+    g_est_seconds = (g_quality_last_seconds > 0.0)
+        ? (int)(g_quality_last_seconds + 0.5)
+        : estimate_demo_seconds(&g_info, &g_hw_info, quality_current_profile());
+    set_status_id(STR_STATUS_QUALITY_TESTING, 0);
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+
+    job = (EstimateJob*)calloc(1, sizeof(EstimateJob));
+    if (!job) {
+        g_quality_testing = 0;
+        set_status_text(text(STR_QUALITY_ERROR), 1);
+        update_controls_visibility();
+        return;
+    }
+    job->hwnd = hWnd;
+    job->gen = g_quality_gen;
+    thread = CreateThread(NULL, 0, quality_thread_proc, job, 0, NULL);
+    if (thread) {
+        CloseHandle(thread);
+    } else {
+        free(job);
+        g_quality_testing = 0;
+        set_status_text(text(STR_QUALITY_ERROR), 1);
+        update_controls_visibility();
+    }
+}
+
+static void quality_ui_on_done(HWND hWnd, EstimateDoneMsg *msg)
+{
+    if (!msg) return;
+    if (msg->gen != g_quality_gen) {
+        free(msg);
+        return;
+    }
+    if (msg->result == ESTIMATE_OK) {
+        g_est = msg->est;
+        g_quality_has_result = 1;
+        g_quality_last_seconds = g_est.total_seconds;
+        quality_ui_update_selection();
+        if (g_est.used_fallback) set_status_text(text(STR_QUALITY_FALLBACK), 0);
+        else set_status_id(STR_QUALITY_DONE, 0);
+    } else if (msg->result == ESTIMATE_CANCELLED) {
+        g_quality_has_result = 0;
+        set_status_id(STR_QUALITY_CANCELED, 0);
+    } else {
+        g_quality_has_result = 0;
+        set_status_text(text(STR_QUALITY_ERROR), 1);
+        gb_message_box(hWnd, text(STR_QUALITY_PANEL), text(STR_QUALITY_ERROR),
+                       MB_OK | MB_ICONERROR);
+    }
+    g_quality_testing = 0;
+    g_est_cancel = 0;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    free(msg);
+}
+
+static void quality_ui_test_again(HWND hWnd)
+{
+    wchar_t note[512];
+    int seconds;
+    if (!g_has_info || g_quality_testing) return;
+    seconds = (g_quality_last_seconds > 0.0)
+        ? (int)(g_quality_last_seconds + 0.5)
+        : estimate_demo_seconds(&g_info, &g_hw_info, quality_current_profile());
+    _snwprintf(note, 512, text(STR_QUALITY_RETEST_FMT), seconds);
+    note[511] = L'\0';
+    if (gb_message_box(hWnd, text(STR_QUALITY_RETEST_TITLE), note,
+                       MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        quality_ui_start(hWnd, 1);
+    }
+}
+
+static void quality_ui_cancel(void)
+{
+    if (!g_quality_testing) return;
+    g_est_cancel = 1;
+    EnableWindow(g_hBtnQCancel, FALSE);
+}
+
+static void quality_ui_back(HWND hWnd)
+{
+    if (g_quality_testing) return;
+    g_step = 0;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+
+static void quality_ui_compress(HWND hWnd)
+{
+    gb_message_box(hWnd, text(STR_QUALITY_PANEL), text(STR_QUALITY_M5_NOTE),
+                   MB_OK | MB_ICONINFORMATION);
+}
+
+static void quality_select_at(HWND hWnd, int x, int y)
+{
+    int i;
+    if (g_quality_testing || !g_quality_has_result) return;
+    for (i = 0; i < g_card_count; i++) {
+        if (PtInRect(&g_rc_cards[i], (POINT){ x, y })) {
+            int level = g_est.levels_used[i];
+            if (level != g_quality_selected) {
+                g_quality_selected = level;
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return;
+        }
+    }
+}
+
+static void quality_ui_reset(void)
+{
+    g_quality_gen++;
+    g_est_cancel = 1;
+    g_quality_testing = 0;
+    g_quality_has_result = 0;
+    g_quality_last_seconds = 0.0;
+    memset(&g_est, 0, sizeof(g_est));
+    memset(&g_est_progress, 0, sizeof(g_est_progress));
+    g_quality_selected = QUALITY_BALANCED;
+}
+
 static void choose_file(HWND hWnd)
 {
     IFileOpenDialog *pfd = NULL;
@@ -1309,6 +1812,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnSkip = CreateWindowExW(0, L"BUTTON", text(STR_HW_SKIP),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 160, 38, hWnd, (HMENU)IDC_BTN_SKIP, inst, NULL);
+            g_hBtnBack = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_BACK),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 100, 38, hWnd, (HMENU)IDC_BTN_BACK, inst, NULL);
+            g_hBtnTestAgain = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_TEST_AGAIN),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 140, 38, hWnd, (HMENU)IDC_BTN_TESTAGAIN, inst, NULL);
+            g_hBtnQCancel = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_CANCEL),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 170, 38, hWnd, (HMENU)IDC_BTN_QCANCEL, inst, NULL);
+            g_hBtnCompress = CreateWindowExW(0, L"BUTTON", text(STR_QUALITY_COMPRESS),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 140, 38, hWnd, (HMENU)IDC_BTN_COMPRESS, inst, NULL);
             g_hBtnMin = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 26, 24, hWnd, (HMENU)IDC_BTN_MIN, inst, NULL);
@@ -1322,11 +1837,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             track_button(g_hBtnRetest);
             track_button(g_hBtnDepth);
             track_button(g_hBtnSkip);
+            track_button(g_hBtnBack);
+            track_button(g_hBtnTestAgain);
+            track_button(g_hBtnQCancel);
+            track_button(g_hBtnCompress);
             track_button(g_hBtnMin);
             track_button(g_hBtnClose);
 
             hw_ui_update_depth_label();
             ShowWindow(g_hBtnSkip, SW_HIDE);
+            ShowWindow(g_hBtnBack, SW_HIDE);
+            ShowWindow(g_hBtnTestAgain, SW_HIDE);
+            ShowWindow(g_hBtnQCancel, SW_HIDE);
+            ShowWindow(g_hBtnCompress, SW_HIDE);
             EnableWindow(g_hBtnContinue, FALSE);
             layout_controls();
             update_controls_visibility();
@@ -1391,10 +1914,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_LBUTTONDOWN: {
+            POINT pt;
+            pt.x = GET_X_LPARAM(lParam);
+            pt.y = GET_Y_LPARAM(lParam);
+            if (g_step == 1 && !g_quality_testing) {
+                quality_select_at(hWnd, pt.x, pt.y);
+                return 0;
+            }
             if (!g_has_info && !g_probing) {
-                POINT pt;
-                pt.x = GET_X_LPARAM(lParam);
-                pt.y = GET_Y_LPARAM(lParam);
                 if (PtInRect(&g_rc_drop, pt)) {
                     choose_file(hWnd);
                     return 0;
@@ -1453,10 +1980,16 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDC_BTN_DETAILS:
                 case IDC_BTN_RETEST:
                 case IDC_BTN_SKIP:
+                case IDC_BTN_BACK:
+                case IDC_BTN_TESTAGAIN:
                     role = GB_ROLE_PUSH;
                     break;
                 case IDC_BTN_CONTINUE:
+                case IDC_BTN_COMPRESS:
                     role = GB_ROLE_PRIMARY;
+                    break;
+                case IDC_BTN_QCANCEL:
+                    role = GB_ROLE_DANGER;
                     break;
                 case IDC_BTN_DEPTH:
                     role = GB_ROLE_DROP;
@@ -1476,9 +2009,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (dis->CtlID == IDC_BTN_DETAILS ||
                     dis->CtlID == IDC_BTN_RETEST ||
                     dis->CtlID == IDC_BTN_DEPTH ||
-                    dis->CtlID == IDC_BTN_SKIP) {
+                    dis->CtlID == IDC_BTN_SKIP ||
+                    dis->CtlID == IDC_BTN_BACK ||
+                    dis->CtlID == IDC_BTN_TESTAGAIN ||
+                    dis->CtlID == IDC_BTN_QCANCEL ||
+                    dis->CtlID == IDC_BTN_COMPRESS) {
                     font = g_fontSmall;
                 }
+                if (dis->CtlID == IDC_BTN_COMPRESS) font = g_fontBold;
                 gb_draw_control(dis, font, role, checked, tracked_hover(dis->hwndItem));
                 return TRUE;
             }
@@ -1495,9 +2033,28 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     return 0;
                 case IDC_BTN_CONTINUE:
                     if (g_has_info) {
-                        gb_message_box(hWnd, text(STR_MSG_CONTINUE_TITLE),
-                                       text(STR_MSG_CONTINUE_TEXT), MB_OK | MB_ICONINFORMATION);
+                        g_step = 1;
+                        quality_ui_update_selection();
+                        if (g_quality_has_result &&
+                            g_est.profile == quality_current_profile()) {
+                            update_controls_visibility();
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        } else {
+                            quality_ui_start(hWnd, 0);
+                        }
                     }
+                    return 0;
+                case IDC_BTN_BACK:
+                    quality_ui_back(hWnd);
+                    return 0;
+                case IDC_BTN_TESTAGAIN:
+                    quality_ui_test_again(hWnd);
+                    return 0;
+                case IDC_BTN_QCANCEL:
+                    quality_ui_cancel();
+                    return 0;
+                case IDC_BTN_COMPRESS:
+                    quality_ui_compress(hWnd);
                     return 0;
                 case IDC_BTN_DETAILS:
                     if (g_has_info) {
@@ -1528,7 +2085,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case WM_KEYDOWN:
             if (wParam == VK_ESCAPE) {
-                if (g_show_details) {
+                if (g_step == 1) {
+                    if (g_quality_testing) quality_ui_cancel();
+                    else quality_ui_back(hWnd);
+                } else if (g_show_details) {
                     g_show_details = 0;
                     update_controls_visibility();
                 } else {
@@ -1578,13 +2138,33 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        case WM_APP_EST_PROGRESS: {
+            EstProgressMsg *p = (EstProgressMsg*)lParam;
+            if (p) {
+                if (p->gen == g_quality_gen && g_quality_testing) {
+                    g_est_progress = p->progress;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                free(p);
+            }
+            return 0;
+        }
+
+        case WM_APP_EST_DONE: {
+            EstimateDoneMsg *m = (EstimateDoneMsg*)lParam;
+            quality_ui_on_done(hWnd, m);
+            return 0;
+        }
+
         case WM_CLOSE:
             if (g_hw_testing) g_hw_cancel = 1;
+            if (g_quality_testing) g_est_cancel = 1;
             DestroyWindow(hWnd);
             return 0;
 
         case WM_DESTROY:
             if (g_hw_testing) g_hw_cancel = 1;
+            if (g_quality_testing) g_est_cancel = 1;
             destroy_fonts();
             g_hWnd = NULL;
             PostQuitMessage(0);
@@ -1649,6 +2229,9 @@ int ui_run(HINSTANCE hInstance, int nCmdShow, const wchar_t *initial_path)
 
     if (hw_load(&g_hw_info)) {
         g_hw_has_info = 1;
+        if (g_hw_info.total_seconds > 0.0) {
+            g_hw_est_seconds = (int)(g_hw_info.total_seconds + 0.5);
+        }
         if (hw_needs_retest(&g_hw_info)) {
             hw_ui_start(hWnd, 1, initial_path);
         } else {

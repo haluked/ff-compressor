@@ -12,6 +12,8 @@
 # Local test media (downloaded/generated, not tracked)
 /tests/media/*
 !/tests/media/.keep
+!/tests/media/phone/
+!/tests/media/phone/.gitkeep
 
 # Editor/OS noise
 *.swp

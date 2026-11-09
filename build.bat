@@ -29,6 +29,8 @@ gcc -std=c11 -O3 -s -flto ^
     src\engine.c ^
     src\probe.c ^
     src\hw.c ^
+    src\presets.c ^
+    src\estimate.c ^
     src\util.c ^
     src\strings.c ^
     src\cjson.c ^

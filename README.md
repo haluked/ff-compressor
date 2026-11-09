@@ -4,10 +4,10 @@ A small, native Windows video compressor built in C with a Game Boy-inspired
 interface. It uses a portable FFmpeg build for analysis and encoding; the
 application itself has no Python, .NET, Electron or Qt runtime.
 
-**Status:** M2 (analysis + first-launch hardware test) is implemented. Quality
-comparison, sample estimates and compression arrive in M3–M6.
+**Status:** M3 (analysis, hardware test and sample-based quality estimates) is
+implemented. SSIM/frame preview and compression arrive in M4–M6.
 
-## What works in M1/M2
+## What works in M1–M3
 
 - Choose a video with the file picker or drag and drop it onto the window.
 - Read it with `ffprobe` in a background worker.
@@ -18,10 +18,19 @@ comparison, sample estimates and compression arrive in M3–M6.
   containers.
 - Unicode paths, fixed 646×485 Game Boy layout, per-monitor DPI.
 - First-launch computer test: CPU/GPU detection, FFmpeg encoder listing, and
-  real 1-second encodes for NVENC, QSV, AMF and CPU x265 (8-bit, plus 10-bit
+  real 3-second encodes for NVENC, QSV, AMF and CPU x265 (8-bit, plus 10-bit
   for GPU encoders).
 - One warm-up run, then three measured runs per encoder; the median is used.
   A 20% hysteresis margin keeps a stored profile stable near a threshold.
+- 10-bit GPU tests write a temporary MP4, then `ffprobe` confirms the actual
+  `pix_fmt` is 10-bit and the profile is Main 10. The temporary file is deleted.
+- The progress screen shows the duration measured on the previous successful
+  run; before the first run it shows a conservative estimate.
+- The log marks an encoder as `tested_on_hardware`, `tested_failed` or
+  `untested_on_hardware`. On this AMD-only development PC, NVENC and QSV are
+  `untested_on_hardware`; they are tested at runtime on the user's machine.
+- The log prints a `near_boundary=` note when a measured value is within 15%
+  of a Light/Thorough threshold.
 - Profiles: Light / Balanced / Thorough. The result is stored in
   `HKCU\Software\ff-compressor`; the app re-tests automatically when the GPU,
   driver, CPU or FFmpeg version changes.
@@ -29,9 +38,25 @@ comparison, sample estimates and compression arrive in M3–M6.
   the test depth used by per-video tests.
 - `Skip` selects the Light profile immediately.
 - Measurement log: `%LOCALAPPDATA%\ff-compressor\hwtest.log`.
+- Quality step: 3–4 real clips from different points, 3–4 quality levels, and
+  estimates for the full video size/time. The chosen encoder comes from the
+  stored hardware profile; the default is H.265.
+- `TEST AGAIN` re-runs the sample test for the current video after a
+  confirmation that shows the previous measured duration (or a conservative
+  estimate on the first run). It is cancellable and caches results for the
+  current file/profile.
+- Estimate ranges are shown as guidance. Results are verified against real
+  footage in `tests/REAL-MEDIA.md`. On the M3 set (5 clips × 4 levels = 20
+  checks), size error was **+2.1% to -11.0%** and time error was **-23.2% to
+  +29.0%**, all inside the ±20% / ±30% targets.
+- The quality-demo label shows a conservative range before the first run and the
+  previous measured duration on repeat runs.
+- NVENC/QSV are tested at runtime on the user's machine. On the AMD-only
+  development PC they are marked `untested_on_hardware`; a failing GPU encoder
+  falls back to CPU x265 with a clear status message.
 
-The second and third wizard steps are visible but intentionally inactive until
-the next milestones.
+The second step is active; the third (full compression) is intentionally a
+placeholder until M5.
 
 ## Requirements
 

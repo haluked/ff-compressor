@@ -28,10 +28,33 @@ Real-world clips (Big Buck Bunny, Jellyfish, Xiph) will only be added if a
 milestone needs footage that synthetic sources cannot represent. If added, each
 file's source URL and licence will be recorded here and in the milestone report.
 
+## Real media and estimates
+
+`tests/media/real/` holds the gitignored Big Buck Bunny, Sintel, Jellyfish and
+Jellyfin clips used for M3 verification. Sources and licences are listed in
+`tests/REAL-MEDIA.md`. `tests/media/phone/` is reserved for the phone clips
+described in `tests/PHONE-VIDEO.md`.
+
+`estimate_check.c` runs the same sample-estimate engine as the UI, then a real
+full encode per level, and prints estimated vs actual size/time:
+
+```cmd
+gcc -std=c11 -O2 -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 ^
+    -Isrc tests\estimate_check.c src\probe.c src\hw.c src\presets.c ^
+    src\estimate.c src\util.c src\strings.c src\cjson.c ^
+    -o tests\build\estimate_check.exe ^
+    -lole32 -luuid -ldxguid -lshell32 -ladvapi32 -lgdi32 -luser32
+
+tests\build\estimate_check.exe tests\media\real\bbb_1080p_30s.mp4 ...
+```
+
 ## Developer diagnostics
 
 - `hwtest_cli.c` — runs the first-launch hardware test N times with the same
   code as the UI and prints the measured speeds/profile.
+- `estimate_check.c` — verifies sample estimates against real full encodes.
+- `fallback_check.c` — advertises NVENC on this AMD machine, forces a failing
+  sample and verifies the CPU x265 fallback path.
 - `hw_detect.c` — prints CPU, GPU, driver and FFmpeg encoder detection.
 - `dxgi_test.c` — minimal DXGI adapter enumeration check.
 
