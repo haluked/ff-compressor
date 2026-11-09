@@ -91,6 +91,10 @@ Source package: https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-full_bu
 Archive SHA256: F0E46253C70DFE902BAC915DFB4224F0CF1B7C6EEAB9DA2CCC9A5581F9A71B13
 Build details and the full configuration are in licenses\FFmpeg-BUILD.txt.
 
+Written source offer: the complete corresponding source for the pinned FFmpeg
+build is available from the project author on request for at least three years
+from the release date, and from the FFmpeg source URLs above.
+
 The application makes no network calls and has no telemetry. FFmpeg runs
 locally on the file the user chooses.
 "@

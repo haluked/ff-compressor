@@ -13,6 +13,9 @@
   --enable-version3 --enable-static`.
 - Bundled files: `bin/ffmpeg.exe`, `bin/ffprobe.exe`.
 - Full build information: `licenses/FFmpeg-BUILD.txt`.
+- Written source offer: the complete corresponding source code for this pinned
+  FFmpeg build is available from the project author on request for at least
+  three years from the release date, and from the FFmpeg source URLs above.
 
 FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
 This project is not affiliated with or endorsed by the FFmpeg project.
