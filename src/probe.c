@@ -245,14 +245,18 @@ ProbeError probe_parse_json(const char *json, SourceInfo *out)
         out->display_height = out->coded_width;
     }
 
-    if ((out->color_transfer[0] && wcscmp(out->color_transfer, L"smpte2084") == 0) ||
-        (out->color_primaries[0] && wcscmp(out->color_primaries, L"bt2020") == 0)) {
+    if (out->color_transfer[0] &&
+        (wcscmp(out->color_transfer, L"smpte2084") == 0 ||
+         wcscmp(out->color_transfer, L"smpte428") == 0 ||
+         wcscmp(out->color_transfer, L"bt2020-10") == 0 ||
+         wcscmp(out->color_transfer, L"bt2020-12") == 0)) {
         out->is_hdr = 1;
     }
     if (out->color_transfer[0] && wcscmp(out->color_transfer, L"arib-std-b67") == 0) {
         out->is_hlg = 1;
         out->is_hdr = 1;
     }
+    if (out->is_dolby_vision) out->is_hdr = 1;
 
     if (out->field_order[0] &&
         wcscmp(out->field_order, L"progressive") != 0 &&

@@ -143,6 +143,23 @@ static void test_dolby_vision(void)
     CHECK(s.bit_depth == 10, "Dolby Vision 10-bit");
 }
 
+static void test_wide_gamut_sdr(void)
+{
+    static const char *json =
+        "{"
+        "\"streams\":["
+        "{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080,"
+        "\"pix_fmt\":\"yuv420p\",\"avg_frame_rate\":\"30/1\",\"r_frame_rate\":\"30/1\","
+        "\"color_primaries\":\"bt2020\",\"color_transfer\":\"bt709\","
+        "\"color_space\":\"bt2020nc\"}"
+        "],"
+        "\"format\":{\"format_name\":\"mp4\",\"duration\":\"10.0\",\"size\":\"10000000\"}"
+        "}";
+    SourceInfo s;
+    CHECK(parse(json, &s) == PROBE_OK, "Wide-gamut SDR fixture parses");
+    CHECK(!s.is_hdr, "BT.2020 with BT.709 transfer is not HDR");
+}
+
 static void test_legacy_rotation_tag(void)
 {
     static const char *json =
@@ -244,6 +261,7 @@ int main(void)
     test_hevc_hdr_rotated();
     test_vfr_interlaced_anamorphic();
     test_dolby_vision();
+    test_wide_gamut_sdr();
     test_legacy_rotation_tag();
     test_opus_webm();
     test_no_video_and_bad_json();
