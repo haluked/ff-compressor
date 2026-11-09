@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: MIT */
 /*
   cJSON - An ultra-lightweight JSON parser in C.
   Derived from Dave Gamble's cJSON (MIT License).

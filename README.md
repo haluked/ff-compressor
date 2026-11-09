@@ -4,11 +4,11 @@ A small, native Windows video compressor built in C with a Game Boy-inspired
 interface. It uses a portable FFmpeg build for analysis and encoding; the
 application itself has no Python, .NET, Electron or Qt runtime.
 
-**Status:** M5 (analysis, hardware test, quality estimates, SSIM/preview and
-full compression) is implemented. M6 covers final validation and release
-polish.
+**Status:** M6 / v1.0.0. Analysis, hardware testing, quality estimates,
+SSIM/preview and full compression are implemented and packaged. Phone-specific
+clips remain pending until real phone footage is available.
 
-## What works in M1–M5
+## What works in M1–M6
 
 - Choose a video with the file picker or drag and drop it onto the window.
 - Read it with `ffprobe` in a background worker.
@@ -99,7 +99,8 @@ polish.
 - Explicit stream maps are used (`-map 0:v:0`, all audio, planned subtitles),
   with metadata and chapters copied and data streams dropped.
 
-The third step is active. M6 remains for final validation and release polish.
+All three steps are active. The release package is built with
+`tools\make-release.ps1`.
 
 ## Requirements
 
@@ -123,6 +124,22 @@ by git.
 
 The executable is written to `dist\ff-compressor.exe`. The build fails if the
 executable exceeds 1 MB.
+
+## Release package
+
+```cmd
+tools\make-release.ps1
+```
+
+This requires a clean git tree and a current `dist\ff-compressor.exe`. It
+creates `dist\ff-compressor-1.0.0-win64\` containing:
+
+- `ff-compressor.exe` and the portable `bin\ffmpeg.exe` / `bin\ffprobe.exe`
+- `LICENSE`, `THIRD_PARTY_NOTICES.md`, `README.md`
+- `licenses\FFmpeg-BUILD.txt` and `bin\FFMPEG_BUILD.txt`
+- `SOURCE.txt` with the exact commit and build instructions
+- `source.zip` (complete tracked source for this release)
+- `SHA256SUMS.txt`
 
 ## Hardware test harness
 

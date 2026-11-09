@@ -9,7 +9,7 @@
 #include <wchar.h>
 #include <stdio.h>
 
-#define APP_VERSION_STR L"0.1.0"
+#define APP_VERSION_STR L"1.0.0"
 #define APP_MUTEX_NAME  L"Local\\ff-compressor"
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
