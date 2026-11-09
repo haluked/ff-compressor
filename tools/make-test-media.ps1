@@ -152,6 +152,15 @@ Run-Ffmpeg @(
     (Join-Path $Out "multi_audio_5s.mkv")
 )
 
+# 13. Clean 15 s clip used for the README walkthrough.
+Run-Ffmpeg @(
+    "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=15",
+    "-f", "lavfi", "-i", "sine=frequency=520:sample_rate=48000:duration=15",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest",
+    (Join-Path $Out "tutorial_demo_v1.mp4")
+)
+
 Write-Host ""
 Write-Host "Generated test media:"
 Get-ChildItem $Out -File | Sort-Object Name | Select-Object Name, Length

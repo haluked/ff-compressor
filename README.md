@@ -8,6 +8,82 @@ application itself has no Python, .NET, Electron or Qt runtime.
 SSIM/preview and full compression are implemented and packaged. Phone-specific
 clips remain pending until real phone footage is available.
 
+## Tutorial
+
+The walkthrough below uses `tutorial_demo_v1.mp4`, a generated 15-second 1080p
+clip. Real videos follow the same steps. You can recreate the demo with
+`tools\make-test-media.ps1`.
+
+### First launch
+
+The app runs a short computer test once and stores the result. `SKIP (USE LIGHT)`
+is available if you want to start immediately; `RE-TEST PC` runs it again later.
+
+![First launch](docs/screenshots/m2-main.png)
+
+![Computer test](docs/screenshots/m2-hwtest.png)
+
+### 1. Choose a video
+
+Drop a video onto the window or choose one with `CHOOSE VIDEO`. The app reads it
+with `ffprobe` and shows resolution, frame rate, bit depth, HDR, audio and track
+counts. `DETAILS` opens the technical view. Press `CONTINUE` when ready.
+
+![Video step](docs/tutorial/01-video.png)
+
+### 2. Compare quality levels
+
+`CONTINUE` runs the sample test: several short clips at the available quality
+levels. Each card shows an estimated final size, estimated time, savings and
+median SSIM. `TEST AGAIN` repeats the test after a confirmation; the previous
+measured duration is shown.
+
+![Quality cards](docs/tutorial/02-quality.png)
+
+### 3. Inspect the frames
+
+`PREVIEW` opens the two-view comparison. The original and compressed frames are
+shown side by side; the level chips switch both the frame and the SSIM summary.
+SSIM is guidance — the frame preview is the real judge. HDR sources are
+tone-mapped to SDR for display.
+
+![Quality preview](docs/tutorial/03-preview.png)
+
+### 4. Choose output settings
+
+`COMPRESS` opens the third step. MKV is the default container; MP4 is available
+for wider device support. H.265 is the default video codec; H.264 is the
+maximum-compatibility option. Audio and bitrate choices are filtered by the
+container, all audio tracks are kept, and the destination is shown before you
+start.
+
+![Compression settings](docs/tutorial/04-settings.png)
+
+### 5. Compress
+
+`START COMPRESSION` runs FFmpeg in the background. The progress view shows the
+percentage, elapsed time, speed and the quality-step estimate. `CANCEL` stops
+FFmpeg and removes the partial file.
+
+![Compression progress](docs/tutorial/05-progress.png)
+
+### 6. Result
+
+The output is written to a `Compressed` folder next to the source as
+`<name> (compressed).<ext>`. A `.partial` file is used until the encode passes
+`ffprobe` verification, then renamed. The original file is never changed.
+`OPEN FOLDER` shows the result.
+
+![Compression complete](docs/tutorial/06-done.png)
+
+### Icon options
+
+Ten alternative Game Boy-style icons are in
+[`docs/icons/`](docs/icons/README.md), with PNG previews and multi-size ICO
+files.
+
+[![Icon options](docs/icons/icon-options.png)](docs/icons/README.md)
+
 ## What works in M1–M6
 
 - Choose a video with the file picker or drag and drop it onto the window.

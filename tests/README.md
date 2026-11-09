@@ -27,6 +27,7 @@ repository clean, and they cover the metadata shapes the app must handle.
 | `audio_128k_5s.mp4` | 128k AAC source for audio re-encoding |
 | `multichannel_5s.mkv` | 5.1 AAC source for downmix planning |
 | `multi_audio_5s.mkv` | Two audio tracks with different codecs |
+| `tutorial_demo_v1.mp4` | Clean 15 s 1080p clip used by the README tutorial |
 
 Real-world clips (Big Buck Bunny, Jellyfish, Xiph) will only be added if a
 milestone needs footage that synthetic sources cannot represent. If added, each
