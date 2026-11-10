@@ -1,0 +1,22 @@
+# Normalise text files so Windows and Unix checkouts agree.
+* text=auto
+
+# Scripts run by cmd.exe/PowerShell on Windows.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.rc  text eol=crlf
+
+# Source and docs use LF.
+*.c   text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf
+
+# Binary assets.
+*.png binary
+*.ico binary
+*.exe binary
+*.7z  binary
+*.mp4 binary
+*.mkv binary
+*.avi binary
+*.zip binary

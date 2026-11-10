@@ -30,9 +30,13 @@ The shipped app still uses `res\app.ico`. To try an alternative:
 ```cmd
 copy /Y docs\icons\icon-01-compress.ico res\app.ico
 build.bat
+git checkout -- res\app.ico
 ```
 
 Change the number to the option you want. The PNGs are for review only; the ICO
 files are what Windows uses for the executable and taskbar.
+
+`res\app.ico` is tracked, so the final `git checkout` restores the shipped icon
+and keeps the working tree clean for `tools\make-release.ps1`.
 
 The icons are GPL-3.0-or-later like the rest of the application.
