@@ -37,11 +37,13 @@ void encode_options_defaults(EncodeOptions *opt, const SourceInfo *src)
     memset(opt, 0, sizeof(*opt));
     opt->container = ENC_CONT_MKV;
     opt->video_codec = ENC_VCODEC_HEVC;
-    opt->audio_codec = (src && src->audio_track_count > 0)
-        ? ENC_ACODEC_OPUS : ENC_ACODEC_COPY;
-    opt->bitrate = ENC_ABITRATE_MUSIC;
-    opt->custom_kbps = ENC_BITRATE_HIGH_KBPS;
-    opt->downmix_stereo = 1;
+    /* Keep the original audio unless the user asks for a conversion. A 36 kbps
+       stereo default on a 5.1 film saves almost nothing and degrades the
+       result, so Copy is the safe default in both containers. */
+    opt->audio_codec = ENC_ACODEC_COPY;
+    opt->bitrate = ENC_ABITRATE_HIGH;
+    opt->custom_kbps = 128;
+    opt->downmix_stereo = 0;
     opt->audio_mask = 0; /* every audio track */
     opt->audio_none = 0;
     opt->video_track = (src && src->video_primary >= 0)

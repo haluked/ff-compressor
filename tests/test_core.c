@@ -502,8 +502,9 @@ static void test_encode_options(void)
     encode_options_defaults(&opt, &src);
     CHECK(opt.container == ENC_CONT_MKV, "default container is MKV");
     CHECK(opt.video_codec == ENC_VCODEC_HEVC, "default video is H.265");
-    CHECK(opt.audio_codec == ENC_ACODEC_OPUS, "default audio is Opus");
-    CHECK(opt.bitrate == ENC_ABITRATE_MUSIC, "default bitrate is Music");
+    CHECK(opt.audio_codec == ENC_ACODEC_COPY, "default audio keeps the original");
+    CHECK(opt.bitrate == ENC_ABITRATE_HIGH, "default bitrate is High");
+    CHECK(!opt.downmix_stereo, "default keeps the original channel layout");
     CHECK(!encode_audio_has_bitrate(ENC_ACODEC_COPY), "copy has no bitrate");
     CHECK(!encode_audio_has_bitrate(ENC_ACODEC_FLAC), "FLAC has no bitrate");
     CHECK(encode_audio_min_kbps(ENC_ACODEC_AC3) == 64, "AC-3 minimum is 64k");
@@ -529,6 +530,7 @@ static void test_encode_options(void)
 
     opt.audio_codec = ENC_ACODEC_OPUS;
     opt.bitrate = ENC_ABITRATE_MUSIC;
+    opt.downmix_stereo = 1;
     CHECK(encode_bitrate_kbps(&opt) == 36, "Music is 36k");
     CHECK(!encode_audio_track_copies(&src, &opt, 0), "48k Opus source is re-encoded at 36k target");
     CHECK(!encode_audio_track_copies(&src, &opt, 1), "128k AAC source is re-encoded");

@@ -1155,6 +1155,10 @@ int gb_message_box(HWND owner, const wchar_t *title, const wchar_t *text, UINT f
     g_msg.pressed = -1;
     g_msg.default_id = (flags & MB_YESNO) ? IDYES : IDOK;
     g_msg.cancel_id = (flags & MB_YESNOCANCEL) ? IDCANCEL : ((flags & MB_YESNO) ? IDNO : IDOK);
+    if (flags & MB_DEFBUTTON2) {
+        g_msg.default_id = (flags & MB_YESNOCANCEL) ? IDNO
+                          : ((flags & MB_YESNO) ? IDNO : IDOK);
+    }
     g_msg.icon_kind = (flags & MB_ICONERROR) ? 1 : ((flags & MB_ICONWARNING) ? 2 : ((flags & MB_ICONQUESTION) ? 3 : 0));
 
     wcsncpy(g_msg.title, title, 95);

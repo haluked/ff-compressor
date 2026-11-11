@@ -10,7 +10,7 @@
    dama deseniyle (dither) elde edilir.
    ------------------------------------------------------------------ */
 #define GB_DARKEST   RGB(0x0F, 0x38, 0x0F)
-#define GB_DARK      RGB(0x30, 0x62, 0x30)
+#define GB_DARK      RGB(0x1F, 0x4A, 0x1F)
 #define GB_LIGHT     RGB(0x8B, 0xAC, 0x0F)
 #define GB_LIGHTEST  RGB(0x9B, 0xBC, 0x0F)
 

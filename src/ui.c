@@ -139,6 +139,7 @@ static wchar_t g_pending_name[256];
 static RECT g_rc_panel;
 static RECT g_rc_drop;
 static RECT g_rc_status;
+static RECT g_rc_tab[3];
 
 static HwInfo g_hw_info;
 static int g_hw_has_info = 0;
@@ -563,6 +564,25 @@ static void format_audio_track_item(int index, wchar_t *out, size_t cap)
     out[cap - 1] = L'\0';
 }
 
+/* Compact language + layout + codec, e.g. "pol 5.1 DTS-HD". */
+static void format_audio_track_short(int index, wchar_t *out, size_t cap)
+{
+    const AudioTrackInfo *at;
+    const wchar_t *name;
+    wchar_t channels[48];
+
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (index < 0 || index >= g_info.audio_tracks_stored) return;
+    at = &g_info.audio_tracks[index];
+    name = at->language[0] ? at->language
+         : (at->title[0] ? at->title : text(STR_COMP_TRACK_NO_LANG));
+    format_track_channels(at->channels, at->layout, channels, 48);
+    _snwprintf(out, cap, L"%ls %ls %ls", name, channels,
+               audio_codec_label(at->codec));
+    out[cap - 1] = L'\0';
+}
+
 static void format_video_track_item(int ordinal, int stored, wchar_t *out, size_t cap)
 {
     const VideoTrackInfo *vt;
@@ -635,6 +655,22 @@ static void format_subtitle_track_item(int index, wchar_t *out, size_t cap)
     _snwprintf(out, cap, text(STR_COMP_SUB_ITEM_FMT),
                st->has_index ? st->index : (index + 1),
                name, subtitle_codec_label(st->codec), kind);
+    out[cap - 1] = L'\0';
+}
+
+/* Compact language + codec, e.g. "eng SRT". */
+static void format_subtitle_track_short(int index, wchar_t *out, size_t cap)
+{
+    const SubtitleTrackInfo *st;
+    const wchar_t *name;
+
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (index < 0 || index >= g_info.subtitle_tracks_stored) return;
+    st = &g_info.subtitle_tracks[index];
+    name = st->language[0] ? st->language
+         : (st->title[0] ? st->title : text(STR_COMP_TRACK_NO_LANG));
+    _snwprintf(out, cap, L"%ls %ls", name, subtitle_codec_label(st->codec));
     out[cap - 1] = L'\0';
 }
 
@@ -804,12 +840,15 @@ static void draw_steps(HDC hdc, int client_w)
     int w = (client_w - S(40) - gap * 2) / 3;
 
     r.left = x; r.top = y; r.right = x + w; r.bottom = y + h;
+    g_rc_tab[0] = r;
     draw_step_tab(hdc, &r, text(STR_STEP_VIDEO), g_step == 0);
     x += w + gap;
     r.left = x; r.right = x + w;
+    g_rc_tab[1] = r;
     draw_step_tab(hdc, &r, text(STR_STEP_QUALITY), g_step == 1);
     x += w + gap;
     r.left = x; r.right = x + w;
+    g_rc_tab[2] = r;
     draw_step_tab(hdc, &r, text(STR_STEP_COMPRESS), g_step == 2);
 }
 
@@ -1356,10 +1395,33 @@ static void draw_quality(HDC hdc)
 
         if (e && e->ssim_available) {
             RECT rr = { r.left + S(8), r.bottom - S(24), r.right - S(8), r.bottom - S(8) };
-            _snwprintf(buf, 512, text(STR_QUALITY_SSIM_FMT), e->ssim);
-            buf[511] = L'\0';
-            gb_text(hdc, g_fontSmallBold, ink, &rr, buf,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            gb_text(hdc, g_fontSmallBold, ink, &rr, quality_ssim_label(e->ssim),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+
+        /* A shape marker so selection is not communicated by colour alone. */
+        if (selected) {
+            RECT cx1, cx2;
+            cx1.left = r.right - S(18);
+            cx1.top = r.top + S(8);
+            cx1.right = cx1.left + S(3);
+            cx1.bottom = cx1.top + S(3);
+            gb_fill(hdc, &cx1, ink);
+            cx2.left = cx1.right;
+            cx2.top = cx1.top + S(3);
+            cx2.right = cx2.left + S(3);
+            cx2.bottom = cx2.top + S(3);
+            gb_fill(hdc, &cx2, ink);
+            cx1.left = cx2.right;
+            cx1.top = cx2.top + S(3);
+            cx1.right = cx1.left + S(3);
+            cx1.bottom = cx1.top + S(3);
+            gb_fill(hdc, &cx1, ink);
+            cx1.left = cx1.right;
+            cx1.top = cx1.top + S(3);
+            cx1.right = cx1.left + S(3);
+            cx1.bottom = cx1.top + S(3);
+            gb_fill(hdc, &cx1, ink);
         }
     }
 
@@ -1841,6 +1903,64 @@ static void encode_ui_refresh_status_estimate(void)
     set_status_text(buf, 0);
 }
 
+static void kept_audio_label(wchar_t *out, size_t cap)
+{
+    int i, selected;
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    selected = encode_selected_audio_count(&g_info, &g_enc_opt);
+    if (g_info.audio_track_count <= 0 || g_enc_opt.audio_none || selected <= 0) {
+        wcsncpy(out, text(STR_COMP_TRACK_NO_AUDIO), cap - 1);
+    } else if (selected == 1) {
+        for (i = 0; i < g_info.audio_tracks_stored; i++) {
+            if (encode_audio_selected(&g_info, &g_enc_opt, i)) {
+                format_audio_track_short(i, out, cap);
+                break;
+            }
+        }
+        if (!out[0]) _snwprintf(out, cap, text(STR_COMP_AUDIO_TRACK_N_FMT), 1);
+    } else {
+        _snwprintf(out, cap, text(STR_COMP_AUDIO_TRACK_N_FMT), selected);
+    }
+    out[cap - 1] = L'\0';
+}
+
+static void kept_subtitle_label(wchar_t *out, size_t cap)
+{
+    int i, selected;
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    selected = encode_selected_subtitle_count(&g_info, &g_enc_opt,
+                                              g_enc_opt.container);
+    if (g_info.subtitle_track_count <= 0 || g_enc_opt.subtitles_none ||
+        selected <= 0) {
+        wcsncpy(out, text(STR_COMP_TRACK_NO_SUBS), cap - 1);
+    } else if (selected == 1) {
+        for (i = 0; i < g_info.subtitle_tracks_stored; i++) {
+            if (encode_subtitle_selected(&g_info, &g_enc_opt, i)) {
+                format_subtitle_track_short(i, out, cap);
+                break;
+            }
+        }
+        if (!out[0]) _snwprintf(out, cap, text(STR_COMP_SUBTITLE_TRACK_N_FMT), 1);
+    } else {
+        _snwprintf(out, cap, text(STR_COMP_SUBTITLE_TRACK_N_FMT), selected);
+    }
+    out[cap - 1] = L'\0';
+}
+
+static int output_free_bytes(long long *free_bytes)
+{
+    wchar_t folder[UTIL_PATH_MAX];
+    ULARGE_INTEGER available, total, total_free;
+    if (!free_bytes) return 0;
+    util_dirname(g_info.path, folder, UTIL_PATH_MAX);
+    if (!folder[0]) return 0;
+    if (!GetDiskFreeSpaceExW(folder, &available, &total, &total_free)) return 0;
+    *free_bytes = (long long)available.QuadPart;
+    return 1;
+}
+
 static void draw_compress_settings(HDC hdc)
 {
     wchar_t buf[1024];
@@ -1853,7 +1973,6 @@ static void draw_compress_settings(HDC hdc)
     int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
     int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
     int selected_audio = encode_selected_audio_count(&g_info, &g_enc_opt);
-    int total_audio = g_info.audio_track_count;
     double video_bytes = compress_video_bytes();
     double src_video_bps = selected_video_source_bps();
     double dst_video_bps = (video_bytes > 0.0 && g_info.duration > 0.0)
@@ -1923,19 +2042,19 @@ static void draw_compress_settings(HDC hdc)
     gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_VIDEO_LABEL),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    SetRect(&r, S(32), S(226), S(104), S(254));
+    SetRect(&r, S(32), S(218), S(104), S(246));
     gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_AUDIO_LABEL),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     if (!has_audio) {
-        SetRect(&r, S(110), S(226), S(614), S(254));
+        SetRect(&r, S(110), S(218), S(614), S(246));
         gb_text(hdc, g_fontSmall, GB_DARK, &r,
                 g_info.audio_track_count > 0
                     ? text(STR_COMP_AUDIO_NONE_SELECTED)
                     : text(STR_COMP_AUDIO_NONE),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     } else if (!has_bitrate) {
-        SetRect(&r, S(292), S(226), S(614), S(254));
+        SetRect(&r, S(258), S(218), S(614), S(246));
         gb_text(hdc, g_fontSmall, GB_DARK, &r,
                 g_enc_opt.audio_codec == ENC_ACODEC_COPY
                     ? text(STR_COMP_NO_BITRATE_COPY)
@@ -1950,7 +2069,7 @@ static void draw_compress_settings(HDC hdc)
     } else {
         buf[0] = L'\0';
     }
-    SetRect(&r, S(32), S(278), S(614), S(296));
+    SetRect(&r, S(32), S(272), S(614), S(286));
     if (path_note) {
         gb_text(hdc, g_fontSmall, GB_DARK, &r, path_note,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
@@ -1980,7 +2099,7 @@ static void draw_compress_settings(HDC hdc)
         _snwprintf(buf, 1024, text(STR_COMP_AUDIO_BREAKDOWN_FMT),
                    audio_src, audio_dst, audio_desc);
         buf[1023] = L'\0';
-        SetRect(&r, S(32), S(299), S(614), S(315));
+        SetRect(&r, S(32), S(287), S(614), S(301));
         gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
@@ -1990,7 +2109,7 @@ static void draw_compress_settings(HDC hdc)
         int selected_subs = encode_selected_subtitle_count(&g_info, &g_enc_opt,
                                                            g_enc_opt.container);
         int show_button = g_info.subtitle_track_count > 0;
-        SetRect(&r, S(32), S(314), S(104), S(338));
+        SetRect(&r, S(32), S(302), S(104), S(326));
         gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_SUBS_LABEL),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
@@ -2018,51 +2137,88 @@ static void draw_compress_settings(HDC hdc)
             }
         }
         buf[1023] = L'\0';
-        SetRect(&r, S(show_button ? 340 : 110), S(314), S(614), S(338));
+        SetRect(&r, S(show_button ? 340 : 110), S(302), S(614), S(326));
         gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
-    /* Context note: HDR conversion, track selection, downmix, or multi-video. */
-    if (g_info.is_hdr && g_enc_opt.video_codec == ENC_VCODEC_H264) {
-        wcsncpy(buf, text(STR_COMP_HDR_TONEMAP), 1023);
+    /* Pre-flight: what the user is committing to, next to START. */
+    {
+        double total_bytes = (video_bytes > 0.0)
+            ? video_bytes + compress_audio_bytes() : 0.0;
+        long long free_bytes = 0;
+        int have_free = output_free_bytes(&free_bytes);
+        int selected_subs = encode_selected_subtitle_count(&g_info, &g_enc_opt,
+                                                           g_enc_opt.container);
+        wchar_t kept_a[64], kept_s[64], need_s[64], free_s[64];
+        wchar_t total_s[64], time_s[64];
+
+        kept_audio_label(kept_a, 64);
+        kept_subtitle_label(kept_s, 64);
+
+        SetRect(&r, S(32), S(322), S(614), S(338));
+        if (total_bytes > 0.0) {
+            util_format_bytes((long long)total_bytes, total_s, 64);
+            util_format_duration(compress_video_seconds(), time_s, 64);
+            _snwprintf(buf, 1024, text(STR_COMP_PREFLIGHT_TOTAL_FMT),
+                       total_s, time_s);
+        } else {
+            wcsncpy(buf, text(STR_COMP_PREFLIGHT_NO_ESTIMATE), 1023);
+        }
         buf[1023] = L'\0';
-        SetRect(&r, S(32), S(340), S(614), S(354));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+        gb_text(hdc, g_fontBold, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    } else if (g_enc_opt.audio_none) {
-        wcsncpy(buf, text(STR_COMP_AUDIO_NONE_SELECTED), 1023);
+
+        _snwprintf(buf, 1024, text(STR_COMP_PREFLIGHT_KEEP_FMT),
+                   selected_audio, g_info.audio_track_count, kept_a,
+                   selected_subs, g_info.subtitle_track_count, kept_s);
         buf[1023] = L'\0';
-        SetRect(&r, S(32), S(340), S(614), S(354));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+        SetRect(&r, S(32), S(339), S(614), S(351));
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    } else if (selected_audio < total_audio) {
-        wcsncpy(buf, text(STR_COMP_TRACK_SELECTED_NOTE), 1023);
+
+        if (have_free && total_bytes > 0.0) {
+            util_format_bytes((long long)total_bytes, need_s, 64);
+            util_format_bytes(free_bytes, free_s, 64);
+            if ((double)free_bytes < total_bytes * 1.03) {
+                _snwprintf(buf, 1024, text(STR_COMP_PREFLIGHT_FREE_LOW_FMT),
+                           need_s, free_s);
+            } else {
+                _snwprintf(buf, 1024, text(STR_COMP_PREFLIGHT_FREE_FMT),
+                           need_s, free_s);
+            }
+        } else {
+            wcsncpy(buf, text(STR_COMP_DONE_NOTE), 1023);
+        }
         buf[1023] = L'\0';
-        SetRect(&r, S(32), S(340), S(614), S(354));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    } else if (downmix_visible) {
-        wcsncpy(buf, text(STR_COMP_DOWNMIX_NOTE), 1023);
-        buf[1023] = L'\0';
-        SetRect(&r, S(32), S(340), S(614), S(354));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    } else if (g_info.video_real_count > 1) {
-        _snwprintf(buf, 1024, text(STR_COMP_MULTI_VIDEO_NOTE),
-                   g_info.video_real_count);
-        buf[1023] = L'\0';
-        SetRect(&r, S(32), S(340), S(614), S(354));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+        SetRect(&r, S(32), S(352), S(614), S(364));
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
-    SetRect(&r, S(32), S(356), S(614), S(374));
-    gb_text(hdc, g_fontSmall, GB_DARK, &r,
-            g_enc_opt.container == ENC_CONT_MKV
-                ? text(STR_COMP_OPUS_NOTE)
-                : text(STR_COMP_HINT),
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    /* One warning line for destructive or surprising selections. */
+    buf[0] = L'\0';
+    if (g_info.audio_track_count > 0 && (g_enc_opt.audio_none || selected_audio <= 0)) {
+        wcsncpy(buf, text(STR_COMP_PREFLIGHT_NONE_AUDIO), 1023);
+    } else if (g_info.subtitle_track_count > 0 &&
+               (g_enc_opt.subtitles_none ||
+                encode_selected_subtitle_count(&g_info, &g_enc_opt,
+                                               g_enc_opt.container) <= 0)) {
+        wcsncpy(buf, text(STR_COMP_PREFLIGHT_NONE_SUBS), 1023);
+    } else if (g_info.is_hdr && g_enc_opt.video_codec == ENC_VCODEC_H264) {
+        wcsncpy(buf, text(STR_COMP_PREFLIGHT_HDR), 1023);
+    } else if (g_info.video_real_count > 1) {
+        _snwprintf(buf, 1024, text(STR_COMP_PREFLIGHT_MULTI_VIDEO_FMT),
+                   g_info.video_real_count);
+    } else if (downmix_visible) {
+        wcsncpy(buf, text(STR_COMP_DOWNMIX_NOTE), 1023);
+    }
+    if (buf[0]) {
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(365), S(614), S(378));
+        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
 }
 
 static void draw_compress_progress(HDC hdc)
@@ -2108,10 +2264,20 @@ static void draw_compress_progress(HDC hdc)
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
     if (g_encode_progress.speed > 0.0) {
-        _snwprintf(buf, 512, L"%.2fx", g_encode_progress.speed);
+        if (total > 0 && percent > 0 && percent < 100) {
+            double left = ((double)elapsed * (100.0 - percent)) / percent;
+            wchar_t left_s[64];
+            if (left < 0.0) left = 0.0;
+            util_format_duration(left, left_s, 64);
+            _snwprintf(buf, 512, text(STR_COMP_LEFT_SPEED_FMT), left_s,
+                       g_encode_progress.speed);
+        } else {
+            _snwprintf(buf, 512, text(STR_COMP_SPEED_FMT),
+                       g_encode_progress.speed);
+        }
         buf[511] = L'\0';
         SetRect(&r, S(32), S(250), S(614), S(268));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
@@ -2148,16 +2314,29 @@ static void draw_compress_done(HDC hdc)
     util_format_bytes(g_encode_size, size, 64);
     _snwprintf(buf, 1024, text(STR_COMP_DONE_SIZE_FMT), size);
     buf[1023] = L'\0';
-    SetRect(&r, S(32), S(190), S(614), S(212));
+    SetRect(&r, S(32), S(190), S(614), S(208));
     gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    SetRect(&r, S(32), S(220), S(614), S(258));
-    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_DONE_VERIFIED),
+    if (g_info.file_size > 0 && g_encode_size > 0) {
+        int save = (int)((1.0 - (double)g_encode_size /
+                                (double)g_info.file_size) * 100.0);
+        if (save < 0) save = 0;
+        if (save > 99) save = 99;
+        util_format_bytes(g_encode_size, size, 64);
+        _snwprintf(buf, 1024, text(STR_COMP_DONE_SAVINGS_FMT), size, save);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(210), S(614), S(228));
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    SetRect(&r, S(32), S(234), S(614), S(266));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, text(STR_COMP_DONE_VERIFIED_SEL),
             DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 
-    SetRect(&r, S(32), S(286), S(614), S(304));
-    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_DONE_NOTE),
+    SetRect(&r, S(32), S(282), S(614), S(300));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, text(STR_COMP_DONE_NOTE),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 }
 
@@ -2178,12 +2357,12 @@ static void draw_compress_error(HDC hdc)
         _snwprintf(buf, 1024, text(STR_COMP_DETAIL_FMT), g_encode_detail);
         buf[1023] = L'\0';
         SetRect(&r, S(32), S(206), S(614), S(300));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
     SetRect(&r, S(32), S(316), S(614), S(348));
-    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_PROGRESS_NOTE),
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, text(STR_COMP_PROGRESS_NOTE),
             DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
@@ -2230,8 +2409,17 @@ static void draw_advanced_settings(HDC hdc)
     gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_ADV_CRF),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    SetRect(&r, S(32), S(262), S(614), S(300));
-    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_ADV_NOTE),
+    if (g_adv_quality == 6) {
+        SetRect(&r, S(198), S(222), S(322), S(254));
+        gb_frame(hdc, &r, GB_DARKEST, S(2));
+    }
+
+    SetRect(&r, S(32), S(262), S(614), S(278));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, text(STR_COMP_ADV_EXPLAIN),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(280), S(614), S(304));
+    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, text(STR_COMP_ADV_NOTE),
             DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 
     if (g_custom_est_testing) {
@@ -2241,7 +2429,7 @@ static void draw_advanced_settings(HDC hdc)
         }
         _snwprintf(buf, 512, text(STR_COMP_ADV_TESTING_FMT), percent);
         buf[511] = L'\0';
-        SetRect(&r, S(32), S(300), S(614), S(318));
+        SetRect(&r, S(32), S(304), S(614), S(318));
         gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
@@ -2348,12 +2536,12 @@ static void layout_controls(void)
     SetWindowPos(g_hBtnContMp4, NULL, S(186), S(146), S(70), S(28), SWP_NOZORDER);
     SetWindowPos(g_hBtnVcHevc, NULL, S(110), S(184), S(150), S(28), SWP_NOZORDER);
     SetWindowPos(g_hBtnVcH264, NULL, S(266), S(184), S(150), S(28), SWP_NOZORDER);
-    SetWindowPos(g_hBtnAudio, NULL, S(110), S(222), S(170), S(30), SWP_NOZORDER);
-    SetWindowPos(g_hBtnABitrate, NULL, S(292), S(222), S(170), S(30), SWP_NOZORDER);
-    SetWindowPos(g_hBtnAudioTrack, NULL, S(468), S(222), S(146), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAudio, NULL, S(110), S(214), S(140), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnABitrate, NULL, S(258), S(214), S(140), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAudioTrack, NULL, S(406), S(214), S(198), S(30), SWP_NOZORDER);
     SetWindowPos(g_hBtnVideoTrack, NULL, S(422), S(184), S(192), S(28), SWP_NOZORDER);
-    SetWindowPos(g_hBtnSubtitleTrack, NULL, S(110), S(314), S(220), S(24), SWP_NOZORDER);
-    SetWindowPos(g_hBtnDownmix, NULL, S(110), S(258), S(220), S(26), SWP_NOZORDER);
+    SetWindowPos(g_hBtnSubtitleTrack, NULL, S(110), S(302), S(220), S(24), SWP_NOZORDER);
+    SetWindowPos(g_hBtnDownmix, NULL, S(110), S(246), S(220), S(24), SWP_NOZORDER);
     SetWindowPos(g_hBtnAdvanced, NULL, cw - S(32) - S(180) - S(8) - S(140),
                  S(388), S(140), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnAdvEnc, NULL, S(200), S(144), S(300), S(30), SWP_NOZORDER);
@@ -2431,9 +2619,11 @@ static void update_controls_visibility(void)
         ShowWindow(g_hBtnAdvQ, SW_SHOW);
         ShowWindow(g_hBtnAdvOk, SW_SHOW);
         ShowWindow(g_hBtnAdvCancel, SW_SHOW);
-        if (g_adv_quality == 5 || g_adv_quality == 6) {
+        if (g_adv_quality == 6) {
             ShowWindow(g_hEditCrf, SW_SHOW);
-            EnableWindow(g_hEditCrf, g_adv_quality == 6 ? TRUE : FALSE);
+            EnableWindow(g_hEditCrf, TRUE);
+        } else {
+            ShowWindow(g_hEditCrf, SW_HIDE);
         }
         encode_ui_update_adv_labels();
         return;
@@ -2489,6 +2679,9 @@ static void update_controls_visibility(void)
             int preview_ok = (g_quality_has_result && idx >= 0 && g_est.preview_available[idx]);
             ShowWindow(g_hBtnBack, SW_SHOW);
             ShowWindow(g_hBtnTestAgain, SW_SHOW);
+            SetWindowTextW(g_hBtnTestAgain,
+                           text(g_quality_has_result ? STR_QUALITY_TEST_AGAIN
+                                                     : STR_QUALITY_RUN_TEST));
             ShowWindow(g_hBtnQCancel, SW_HIDE);
             ShowWindow(g_hBtnCompress, SW_SHOW);
             SetWindowTextW(g_hBtnBack, text(g_quality_preview ? STR_QUALITY_BACK_CARDS : STR_QUALITY_BACK));
@@ -3179,7 +3372,7 @@ static void quality_select_at(HWND hWnd, int x, int y)
     POINT pt;
     pt.x = x;
     pt.y = y;
-    if (g_quality_testing || !g_quality_has_result) return;
+    if (g_quality_testing) return;
     if (!g_quality_preview) {
         if (g_quality_show_details) {
             if (PtInRect(&g_rc_q_deep, pt)) {
@@ -3207,6 +3400,7 @@ static void quality_select_at(HWND hWnd, int x, int y)
             }
         }
     }
+    if (!g_quality_has_result) return;
     if (g_quality_preview) {
         for (i = 0; i < g_preview_chip_count; i++) {
             if (PtInRect(&g_rc_preview_chips[i], pt)) {
@@ -3232,6 +3426,27 @@ static void quality_select_at(HWND hWnd, int x, int y)
             InvalidateRect(hWnd, NULL, FALSE);
             return;
         }
+    }
+}
+
+static void quality_keyboard_cycle(HWND hWnd, int delta)
+{
+    int levels[ESTIMATE_MAX_LEVELS], count, i, idx = -1;
+    if (!g_quality_has_result || g_quality_testing || g_quality_preview) return;
+    count = g_est.level_count;
+    if (count <= 0) return;
+    for (i = 0; i < count; i++) levels[i] = g_est.levels_used[i];
+    for (i = 0; i < count; i++) {
+        if (levels[i] == g_quality_selected) idx = i;
+    }
+    if (idx < 0) idx = 0;
+    idx = (idx + delta + count) % count;
+    if (levels[idx] != g_quality_selected) {
+        g_quality_selected = levels[idx];
+        g_enc_opt.crf_override = 0;
+        g_enc_opt.encoder_override = g_quality_encoder;
+        g_custom_est_ready = 0;
+        InvalidateRect(hWnd, NULL, FALSE);
     }
 }
 
@@ -3314,7 +3529,7 @@ static void encode_ui_update_controls(void)
             ShowWindow(g_hBtnAudio, SW_SHOW);
             SetWindowTextW(g_hBtnAudio, encode_audio_codec_label(g_enc_opt.audio_codec));
         }
-        if (g_info.audio_tracks_stored > 1) {
+        if (g_info.audio_tracks_stored > 0) {
             ShowWindow(g_hBtnAudioTrack, SW_SHOW);
         }
         if (g_info.video_real_count > 1) {
@@ -3446,22 +3661,21 @@ static void encode_ui_update_track_labels(void)
 {
     wchar_t buf[96];
 
-    if (g_info.audio_tracks_stored > 1) {
+    if (g_info.audio_tracks_stored > 0) {
         int selected = encode_selected_audio_count(&g_info, &g_enc_opt);
         buf[0] = L'\0';
         if (g_enc_opt.audio_none) {
             wcsncpy(buf, text(STR_COMP_AUDIO_TRACK_NONE_FMT), 95);
-        } else if (g_enc_opt.audio_mask == 0 ||
-            selected >= g_info.audio_tracks_stored) {
-            _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_ALL_FMT),
-                       g_info.audio_tracks_stored);
         } else if (selected == 1) {
             int i, found = 0;
             for (i = 0; i < g_info.audio_tracks_stored; i++) {
                 if (encode_audio_selected(&g_info, &g_enc_opt, i)) { found = i; break; }
             }
-            _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_ONE_FMT),
-                       found + 1, g_info.audio_tracks_stored);
+            format_audio_track_short(found, buf, 96);
+        } else if (g_enc_opt.audio_mask == 0 ||
+                   selected >= g_info.audio_tracks_stored) {
+            _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_ALL_FMT),
+                       g_info.audio_tracks_stored);
         } else {
             _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_N_FMT), selected);
         }
@@ -3490,6 +3704,11 @@ static void encode_ui_audio_track_picked(int index, void *user)
         g_enc_opt.audio_mask = 0; /* all tracks */
         g_enc_opt.audio_none = 0;
     } else if (index == 1) {
+        if (gb_message_box(g_hWnd, text(STR_COMP_TRACK_NO_AUDIO),
+                           text(STR_COMP_PREFLIGHT_NONE_AUDIO),
+                           MB_YESNO | MB_ICONWARNING) != IDYES) {
+            return;
+        }
         g_enc_opt.audio_mask = 0;
         g_enc_opt.audio_none = 1;
     } else {
@@ -3534,7 +3753,7 @@ static void encode_ui_open_audio_track_dropdown(HWND hWnd)
                g_info.audio_tracks_stored);
     g_track_items[0][159] = L'\0';
     ptrs[count++] = g_track_items[0];
-    wcsncpy(g_track_items[1], text(STR_COMP_TRACK_NO_AUDIO), 159);
+    wcsncpy(g_track_items[1], text(STR_COMP_TRACK_NO_AUDIO_MENU), 159);
     g_track_items[1][159] = L'\0';
     ptrs[count++] = g_track_items[1];
     for (i = 0; i < g_info.audio_tracks_stored &&
@@ -3581,6 +3800,11 @@ static void encode_ui_subtitle_track_picked(int index, void *user)
         g_enc_opt.subtitle_mask = 0;
         g_enc_opt.subtitles_none = 0;
     } else if (index == 1) {
+        if (gb_message_box(g_hWnd, text(STR_COMP_TRACK_NO_SUBS),
+                           text(STR_COMP_PREFLIGHT_NONE_SUBS),
+                           MB_YESNO | MB_ICONWARNING) != IDYES) {
+            return;
+        }
         g_enc_opt.subtitle_mask = 0;
         g_enc_opt.subtitles_none = 1;
     } else {
@@ -3604,7 +3828,7 @@ static void encode_ui_open_subtitle_track_dropdown(HWND hWnd)
                g_info.subtitle_tracks_stored);
     g_sub_items[0][159] = L'\0';
     ptrs[count++] = g_sub_items[0];
-    wcsncpy(g_sub_items[1], text(STR_COMP_TRACK_NO_SUBS), 159);
+    wcsncpy(g_sub_items[1], text(STR_COMP_TRACK_NO_SUBS_MENU), 159);
     g_sub_items[1][159] = L'\0';
     ptrs[count++] = g_sub_items[1];
 
@@ -3636,13 +3860,23 @@ static void encode_ui_refresh_subtitle_button(void)
                                               g_enc_opt.container);
     if (g_enc_opt.subtitles_none) {
         wcsncpy(buf, text(STR_COMP_SUBTITLE_TRACK_NONE_FMT), 95);
+    } else if (selected == 1) {
+        int i;
+        buf[0] = L'\0';
+        for (i = 0; i < g_info.subtitle_tracks_stored; i++) {
+            if (encode_subtitle_selected(&g_info, &g_enc_opt, i)) {
+                format_subtitle_track_short(i, buf, 96);
+                break;
+            }
+        }
+        if (!buf[0]) {
+            _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ONE_FMT), selected);
+        }
     } else if (g_enc_opt.subtitle_mask == 0) {
         int all = (g_enc_opt.container == ENC_CONT_MP4)
             ? encode_text_subtitle_count(&g_info)
             : g_info.subtitle_tracks_stored;
         _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ALL_FMT), all);
-    } else if (selected == 1) {
-        _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ONE_FMT), selected);
     } else {
         _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_N_FMT), selected);
     }
@@ -4169,6 +4403,23 @@ static void encode_ui_start(HWND hWnd)
         return;
     }
 
+    {
+        long long free_bytes = 0;
+        double need = compress_video_bytes() + compress_audio_bytes();
+        if (need > 0.0 && output_free_bytes(&free_bytes) &&
+            (double)free_bytes < need * 1.03) {
+            wchar_t need_s[64], free_s[64], note[512];
+            util_format_bytes((long long)need, need_s, 64);
+            util_format_bytes(free_bytes, free_s, 64);
+            _snwprintf(note, 512, text(STR_COMP_PREFLIGHT_FREE_LOW_FMT),
+                       need_s, free_s);
+            note[511] = L'\0';
+            gb_message_box(hWnd, text(STR_COMP_PANEL), note,
+                           MB_OK | MB_ICONERROR);
+            return;
+        }
+    }
+
     encoder = g_quality_has_result ? g_est.encoder
                                    : estimate_choose_encoder(&g_info, &g_hw_info);
 
@@ -4215,7 +4466,18 @@ static void encode_ui_start(HWND hWnd)
 
 static void encode_ui_cancel(void)
 {
+    wchar_t note[512];
+    int percent;
     if (g_encode_state != 1) return;
+    percent = (int)(g_encode_progress.fraction * 100.0);
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    _snwprintf(note, 512, text(STR_COMP_CANCEL_CONFIRM_FMT), percent);
+    note[511] = L'\0';
+    if (gb_message_box(g_hWnd, text(STR_COMP_CANCEL_TITLE), note,
+                       MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
     g_encode_cancel = 1;
     EnableWindow(g_hBtnECancel, FALSE);
 }
@@ -4566,6 +4828,23 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             pt.x = GET_X_LPARAM(lParam);
             pt.y = GET_Y_LPARAM(lParam);
             if (g_advanced_active || g_input_active || g_hw_testing) break;
+            /* The step tabs are real navigation once a step is reachable. */
+            if (PtInRect(&g_rc_tab[0], pt) && g_step > 0) {
+                if (g_step == 2) {
+                    if (g_encode_state == 1) break;
+                    encode_ui_back(hWnd);
+                }
+                if (g_step == 1 && !g_quality_testing) {
+                    quality_ui_back(hWnd);
+                    if (g_step == 1) quality_ui_back(hWnd);
+                }
+                return 0;
+            }
+            if (PtInRect(&g_rc_tab[1], pt) && g_step == 2) {
+                if (g_encode_state == 1) break;
+                encode_ui_back(hWnd);
+                return 0;
+            }
             if (g_step == 1 && !g_quality_testing) {
                 quality_select_at(hWnd, pt.x, pt.y);
                 return 0;
@@ -4652,8 +4931,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     role = GB_ROLE_PRIMARY;
                     break;
                 case IDC_BTN_QCANCEL:
+                    role = GB_ROLE_PUSH;
+                    break;
                 case IDC_BTN_ECANCEL:
-                    role = GB_ROLE_DANGER;
+                    role = GB_ROLE_PUSH;
                     break;
                 case IDC_BTN_DEPTH:
                 case IDC_BTN_AUDIO:
@@ -4902,6 +5183,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_KEYDOWN:
+            if (g_step == 1 && !g_quality_testing && !g_advanced_active &&
+                !g_input_active && !g_quality_preview &&
+                (wParam == VK_LEFT || wParam == VK_RIGHT)) {
+                quality_keyboard_cycle(hWnd, wParam == VK_LEFT ? -1 : 1);
+                return 0;
+            }
             if (wParam == VK_ESCAPE) {
                 if (g_input_active) {
                     encode_ui_close_custom();
@@ -5021,7 +5308,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_step == 2 && g_encode_state == 0) encode_ui_open_custom(hWnd);
             return 0;
 
-        case WM_CTLCOLOREDIT: {
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC: {
             HDC dc = (HDC)wParam;
             SetTextColor(dc, GB_DARKEST);
             SetBkColor(dc, GB_LIGHTEST);
@@ -5033,7 +5321,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (g_encode_state == 1) {
                 if (gb_message_box(hWnd, text(STR_COMP_CLOSE_TITLE),
                                    text(STR_COMP_CLOSE_TEXT),
-                                   MB_YESNO | MB_ICONWARNING) != IDYES) {
+                                   MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
                     return 0;
                 }
                 g_encode_cancel = 1;

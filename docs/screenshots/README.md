@@ -36,12 +36,12 @@ The test screens are transient; the cards are the normal quality-step state.
 
 ## M5 — compression
 
-- `m5-settings.png` — compression step defaults: MKV, H.265, Opus at Music
-  36 kbps, with the selected quality, estimate, destination and audio summary.
+- `m5-settings.png` — compression step defaults: MKV, H.265, `Keep original`
+  audio, with the selected quality, estimate, destination and audio summary.
 - `m5-settings-mp4-h264.png` — MP4 + H.264 selected; audio switches to AAC and
   the compatibility note changes.
-- `m5-settings-multichannel.png` — 5.1 source with the `DOWNMIX TO STEREO`
-  proposal and note.
+- `m5-settings-multichannel.png` — 5.1 source with the optional `DOWNMIX TO
+  STEREO` control (off by default so the original layout is kept).
 - `m5-custom-bitrate.png` — custom bitrate dialog with the Game Boy-styled
   input field.
 - `m5-settings-custom-bitrate.png` — settings after applying a custom
@@ -57,19 +57,22 @@ The test screens are transient; the cards are the normal quality-step state.
   1080p 60 fps HEVC10 clip from the release folder using its own `bin\ffmpeg`
   and `bin\ffprobe`, with the verified result shown.
 
-## M7 — advanced quality, archive and track editing
+## M7 — advanced quality, archive and track editing (v1.1.0)
 
 - `m7-quality-details.png` — the quality screen `DETAILS` view: each preset's
-  x265 CRF, QSV, NVENC and AMF values, plus the `DEEP ANALYZE` action.
-- `m7-advanced.png` — the `ADVANCED` panel with encoder and quality selection.
-- `m7-archive.png` — `Archive (CPU x265 CRF 19)` selected; the CRF field shows 19.
+  x265 CRF, QSV, NVENC and AMF values, plus the `IMPROVE ESTIMATE` action.
+- `m7-advanced.png` — the `ADVANCED` panel with encoder and quality selection,
+  the CPU-vs-GPU explanation, and `APPLY & TEST`.
+- `m7-archive.png` — `Archive (CPU x265 CRF 19)` selected; the fixed value is
+  shown in the quality label.
 - `m7-audio-tracks.png` — audio track menu with `No audio`, absolute ffprobe
   indices, language/title, codec, channel layout and bitrate.
 - `m7-subtitle-tracks.png` — subtitle track menu with `No subtitles` and the
   absolute stream indices.
 
-The tutorial images `02-quality.png` and `04-settings.png` were refreshed for
-the same build. The quality cards now show the active encoder's CRF/CQ/gq/QP
-value under every preset, and the `ENCODER` chip can switch between Auto,
-CPU x265 and the tested GPU encoders. They also show video-only source→target
-estimates; the compress screen adds the selected audio and the total.
+The tutorial images `01-video.png`, `02-quality.png` and `04-settings.png` were
+refreshed for v1.1.0. The quality cards show a plain-language quality label and
+a shape-based selection marker; the `ENCODER` chip can switch between Auto,
+CPU x265 and the tested GPU encoders. The compress screen now shows a
+pre-flight block with the final size/time, the exact kept audio/subtitle
+tracks, free space and the “original stays untouched” reassurance.

@@ -32,13 +32,13 @@ is available if you want to start immediately; `RE-TEST PC` runs it again later.
 
 Drop a video onto the window or choose one with `CHOOSE VIDEO`. The app reads it
 with `ffprobe` and shows resolution, frame rate, bit depth, HDR, audio and track
-counts. `DETAILS` opens the technical view. Press `CONTINUE` when ready.
+counts. `DETAILS` opens the technical view. Press `TEST QUALITY` when ready.
 
 ![Video step](docs/tutorial/01-video.png)
 
 ### 2. Compare quality levels
 
-`CONTINUE` runs the sample test: several short clips at the available quality
+`TEST QUALITY` runs the sample test: several short clips at the available quality
 levels. Each card shows an estimated video-only size, estimated time, video
 savings and median SSIM. `TEST AGAIN` repeats the test after a confirmation; the
 previous measured duration is shown.
@@ -46,7 +46,7 @@ previous measured duration is shown.
 ![Quality cards](docs/tutorial/02-quality.png)
 
 `DETAILS` shows the actual x265 CRF, QSV, NVENC and AMF value behind each preset.
-`DEEP ANALYZE` re-samples long/grainy films with 4 × 6s clips instead of 3 × 4s.
+`IMPROVE ESTIMATE` (in `DETAILS`) re-samples long/grainy films with 4 × 6s clips instead of 3 × 4s.
 The cards show video-only size; audio is added on the next screen. The
 `ENCODER` chip switches between Auto, CPU x265 and any tested GPU encoder
 (Intel QSV, NVIDIA NVENC, AMD AMF); changing it re-runs the preset test with
@@ -67,11 +67,17 @@ tone-mapped to SDR for display.
 
 ### 4. Choose output settings
 
-`COMPRESS` opens the third step. MKV is the default container; MP4 is available
+`OUTPUT SETTINGS` opens the third step. MKV is the default container; MP4 is available
 for wider device support. H.265 is the default video codec; H.264 is the
 maximum-compatibility option. Audio and bitrate choices are filtered by the
 container, audio tracks and subtitle tracks can be selected individually (or
 dropped entirely), and the destination is shown before you start.
+
+The pre-flight block next to `START COMPRESSION` repeats the final size/time,
+the exact audio/subtitle tracks being kept, the free space on the destination
+drive and the reassurance that the original file stays untouched. Audio is kept
+as-is by default; converting to Opus/AAC is a deliberate choice. If the output
+would have no audio or no subtitles, the app warns you before starting.
 
 ![Compression settings](docs/tutorial/04-settings.png)
 
@@ -183,7 +189,7 @@ files.
   estimate before compression starts. Hardware quality numbers are not CRF; the
   panel says so.
 - The quality screen has a `DETAILS` view that lists the actual CRF/QSV/NVENC/AMF
-  value behind every preset, and a `DEEP ANALYZE` action that samples 4 x 6s
+  value behind every preset, and an `IMPROVE ESTIMATE` action that samples 4 x 6s
   clips instead of the normal 3 x 4s for long or grainy films.
 - Estimates are video-only on the quality screen. The UI shows the real source
   video size/codec/bitrate and the target size/codec/bitrate, e.g.
@@ -191,7 +197,7 @@ files.
   for on the compress screen, where the same source -> target breakdown is shown
   for the selected audio tracks.
 - Audio choices are filtered by container and kept in the requested order:
-  Copy, Opus (default), AAC, MP3, FLAC, AC-3, E-AC-3, Vorbis. MP4 hides Opus,
+  Copy (default), Opus, AAC, MP3, FLAC, AC-3, E-AC-3, Vorbis. MP4 hides Opus,
   FLAC and Vorbis. Bitrates are Voice 24k / Music 36k / High 64k / Custom, with
   no bitrate for Copy or FLAC. A custom value can be typed directly (16–512
   kbps; 64 kbps minimum for AC-3/E-AC-3 and 32 kbps for Vorbis). The Opus
@@ -203,9 +209,9 @@ files.
   and per-stream encoder options. A track is copied only when its source codec
   already matches the requested codec and no stereo downmix was requested; a
   24 kbps AAC track selected as Opus is re-encoded to Opus, not passed through.
-  Multichannel tracks that are being re-encoded are proposed for stereo downmix
-  (on by default; MP3/AC-3/E-AC-3 always use stereo). Copy and FLAC keep their
-  channels.
+  Multichannel tracks that are being re-encoded keep their layout by default;
+  the DOWNMIX checkbox switches them to stereo (MP3/AC-3/E-AC-3 always use
+  stereo). Copy and FLAC keep their channels.
 - Subtitle tracks are selectable too: `ALL n SUBTITLES`, `NO SUBTITLES` or a
   single track. MKV copies supported text/bitmap codecs and converts unsupported
   text such as `mov_text` to SRT; MP4 converts selected text tracks to
@@ -325,7 +331,7 @@ result. The M5 matrix covered:
 
 Real 4K HDR10 HEVC was re-encoded to a 10-bit HEVC output with BT.2020/PQ tags
 intact; real 1080p HDR10 was also written to MP4 with `hvc1`. The current app
-build is **468.5 KB**, and the core suite passes **612 tests**.
+build is **480.5 KB**, and the core suite passes **636 tests**.
 
 ## M7 release validation
 
