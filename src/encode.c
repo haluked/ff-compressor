@@ -352,6 +352,22 @@ int encode_any_downmix(const SourceInfo *src, const EncodeOptions *opt)
     return 0;
 }
 
+/* True when the selected tracks could be downmixed, regardless of whether the
+   user has currently enabled DOWNMIX. The control must stay visible so it can
+   be turned on. */
+int encode_any_downmix_possible(const SourceInfo *src, const EncodeOptions *opt)
+{
+    int i;
+    if (!src || !opt) return 0;
+    if (!encode_audio_has_bitrate(opt->audio_codec)) return 0;
+    if (src->audio_tracks_stored <= 0) return src->audio_channels > 2;
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        if (!encode_audio_selected(src, opt, i)) continue;
+        if (track_channels(src, i) > 2) return 1;
+    }
+    return 0;
+}
+
 static const wchar_t *audio_codec_name(int codec)
 {
     switch (codec) {

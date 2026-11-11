@@ -103,6 +103,8 @@ int  encode_bitrate_kbps(const EncodeOptions *opt);
 int  encode_audio_downmix_track(const SourceInfo *src, const EncodeOptions *opt,
                                 int track_index);
 int  encode_any_downmix(const SourceInfo *src, const EncodeOptions *opt);
+int  encode_any_downmix_possible(const SourceInfo *src,
+                                 const EncodeOptions *opt);
 int  encode_audio_track_copies(const SourceInfo *src, const EncodeOptions *opt,
                                int track_index);
 int  encode_audio_selected(const SourceInfo *src, const EncodeOptions *opt,

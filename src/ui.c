@@ -113,7 +113,6 @@ static HWND g_hBtnInputOk = NULL;
 static HWND g_hBtnInputCancel = NULL;
 static HWND g_hEditCustom = NULL;
 static HBRUSH g_brushLightest = NULL;
-static WNDPROC g_edit_old_proc = NULL;
 
 static HFONT g_fontTitle = NULL;
 static HFONT g_fontBold = NULL;
@@ -354,24 +353,120 @@ static LRESULT CALLBACK tracked_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                : DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-static LRESULT CALLBACK custom_edit_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+#define GB_INPUT_CLASS L"GbInputWnd"
+static int g_input_class_registered = 0;
+
+static LRESULT CALLBACK gb_input_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    if (msg == WM_KEYDOWN) {
-        if (wParam == VK_RETURN) {
-            SendMessageW(GetParent(hwnd), WM_COMMAND,
-                         MAKEWPARAM(IDC_BTN_INPUT_OK, BN_CLICKED), 0);
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc, tr;
+            HBRUSH br;
+            wchar_t value[32];
+            GetClientRect(hwnd, &rc);
+            br = CreateSolidBrush(GB_LIGHTEST);
+            if (br) { FillRect(dc, &rc, br); DeleteObject(br); }
+            GetWindowTextW(hwnd, value, 32);
+            tr = rc;
+            tr.left += S(6);
+            tr.right -= S(4);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, GB_DARKEST);
+            SelectObject(dc, g_fontBold);
+            DrawTextW(dc, value, -1, &tr,
+                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            if (GetFocus() == hwnd) {
+                SIZE sz;
+                RECT caret;
+                HBRUSH cb;
+                int x = rc.left + S(6);
+                GetTextExtentPoint32W(dc, value, (int)wcslen(value), &sz);
+                x += sz.cx;
+                if (x > rc.right - S(5)) x = rc.right - S(5);
+                caret.left = x;
+                caret.top = rc.top + S(5);
+                caret.right = x + S(1);
+                caret.bottom = rc.bottom - S(5);
+                cb = CreateSolidBrush(GB_DARKEST);
+                if (cb) { FillRect(dc, &caret, cb); DeleteObject(cb); }
+            }
+            EndPaint(hwnd, &ps);
             return 0;
         }
-        if (wParam == VK_ESCAPE) {
-            SendMessageW(GetParent(hwnd), WM_COMMAND,
-                         MAKEWPARAM(IDC_BTN_INPUT_CANCEL, BN_CLICKED), 0);
+        case WM_CHAR: {
+            wchar_t value[32];
+            int len, maxlen;
+            if (wParam == VK_BACK) {
+                GetWindowTextW(hwnd, value, 32);
+                len = (int)wcslen(value);
+                if (len > 0) {
+                    value[len - 1] = L'\0';
+                    SetWindowTextW(hwnd, value);
+                }
+                InvalidateRect(hwnd, NULL, FALSE);
+                return 0;
+            }
+            if (wParam < L'0' || wParam > L'9') return 0;
+            maxlen = (hwnd == g_hEditCrf) ? 2 : 4;
+            GetWindowTextW(hwnd, value, 32);
+            len = (int)wcslen(value);
+            if (len < maxlen) {
+                value[len] = (wchar_t)wParam;
+                value[len + 1] = L'\0';
+                SetWindowTextW(hwnd, value);
+            }
+            InvalidateRect(hwnd, NULL, FALSE);
             return 0;
+        }
+        case WM_KEYDOWN:
+            if (wParam == VK_RETURN) {
+                PostMessageW(GetParent(hwnd), WM_COMMAND,
+                    MAKEWPARAM(hwnd == g_hEditCrf ? IDC_BTN_ADV_OK
+                                                  : IDC_BTN_INPUT_OK,
+                               BN_CLICKED), 0);
+                return 0;
+            }
+            if (wParam == VK_ESCAPE) {
+                PostMessageW(GetParent(hwnd), WM_COMMAND,
+                    MAKEWPARAM(hwnd == g_hEditCrf ? IDC_BTN_ADV_CANCEL
+                                                  : IDC_BTN_INPUT_CANCEL,
+                               BN_CLICKED), 0);
+                return 0;
+            }
+            return 0;
+        case WM_LBUTTONDOWN:
+            SetFocus(hwnd);
+            return 0;
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        case WM_GETDLGCODE: {
+            MSG *m = (MSG*)lParam;
+            if (m && m->message == WM_KEYDOWN &&
+                (m->wParam == VK_RETURN || m->wParam == VK_ESCAPE)) {
+                return DLGC_WANTALLKEYS;
+            }
+            return DLGC_WANTCHARS;
         }
     }
-    if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) return 0;
-    return g_edit_old_proc
-        ? CallWindowProcW(g_edit_old_proc, hwnd, msg, wParam, lParam)
-        : DefWindowProcW(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void register_input_class(void)
+{
+    WNDCLASSEXW wc;
+    if (g_input_class_registered) return;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = gb_input_proc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_IBEAM);
+    wc.lpszClassName = GB_INPUT_CLASS;
+    RegisterClassExW(&wc);
+    g_input_class_registered = 1;
 }
 
 static void track_button(HWND hwnd)
@@ -1971,7 +2066,8 @@ static void draw_compress_settings(HDC hdc)
     RECT r;
     int has_audio = g_info.audio_track_count > 0 && !g_enc_opt.audio_none;
     int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
-    int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
+    int downmix_visible = has_bitrate &&
+                          encode_any_downmix_possible(&g_info, &g_enc_opt);
     int selected_audio = encode_selected_audio_count(&g_info, &g_enc_opt);
     double video_bytes = compress_video_bytes();
     double src_video_bps = selected_video_source_bps();
@@ -2210,7 +2306,7 @@ static void draw_compress_settings(HDC hdc)
     } else if (g_info.video_real_count > 1) {
         _snwprintf(buf, 1024, text(STR_COMP_PREFLIGHT_MULTI_VIDEO_FMT),
                    g_info.video_real_count);
-    } else if (downmix_visible) {
+    } else if (downmix_visible && g_enc_opt.downmix_stereo) {
         wcsncpy(buf, text(STR_COMP_DOWNMIX_NOTE), 1023);
     }
     if (buf[0]) {
@@ -3493,7 +3589,8 @@ static void encode_ui_update_controls(void)
 {
     int has_audio = g_info.audio_track_count > 0 && !g_enc_opt.audio_none;
     int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
-    int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
+    int downmix_visible = has_bitrate &&
+                          encode_any_downmix_possible(&g_info, &g_enc_opt);
     wchar_t buf[128];
 
     ShowWindow(g_hBtnChoose, SW_HIDE);
@@ -4277,7 +4374,6 @@ static void encode_ui_open_custom(HWND hWnd)
     _snwprintf(buf, 32, L"%d", g_enc_opt.custom_kbps);
     buf[31] = L'\0';
     SetWindowTextW(g_hEditCustom, buf);
-    SendMessageW(g_hEditCustom, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
     g_input_active = 1;
     update_controls_visibility();
     InvalidateRect(hWnd, NULL, FALSE);
@@ -4511,11 +4607,13 @@ static void encode_ui_back(HWND hWnd)
 
 static void encode_ui_on_done(HWND hWnd, EncodeDoneMsg *msg)
 {
+    int cancelled;
     if (!msg) return;
     if (msg->gen != g_encode_gen) {
         free(msg);
         return;
     }
+    cancelled = (msg->result == ENCODE_CANCELLED);
 
     if (msg->result == ENCODE_OK) {
         g_encode_state = 2;
@@ -4541,6 +4639,7 @@ static void encode_ui_on_done(HWND hWnd, EncodeDoneMsg *msg)
 
     g_encode_cancel = 0;
     update_controls_visibility();
+    if (cancelled) set_status_id(STR_STATUS_ENCODE_CANCELLED, 0);
     InvalidateRect(hWnd, NULL, FALSE);
     free(msg);
 }
@@ -4597,6 +4696,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             update_fixed_metrics();
             gb_set_dpi(g_dpi);
             create_fonts();
+            g_brushLightest = CreateSolidBrush(GB_LIGHTEST);
             set_status_id(STR_STATUS_READY, 0);
 
             g_hBtnChoose = CreateWindowExW(0, L"BUTTON", text(STR_BTN_CHOOSE),
@@ -4671,11 +4771,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnAdvQ = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 300, 30, hWnd, (HMENU)IDC_BTN_ADV_Q, inst, NULL);
-            g_hEditCrf = CreateWindowExW(0, L"EDIT", L"19",
-                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+            register_input_class();
+            g_hEditCrf = CreateWindowExW(0, GB_INPUT_CLASS, L"19",
+                WS_CHILD | WS_TABSTOP,
                 0, 0, 120, 28, hWnd, (HMENU)IDC_EDIT_CRF, inst, NULL);
             SendMessageW(g_hEditCrf, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
-            SendMessageW(g_hEditCrf, EM_SETLIMITTEXT, 2, 0);
+
             g_hBtnAdvOk = CreateWindowExW(0, L"BUTTON", text(STR_COMP_ADV_APPLY),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 180, 34, hWnd, (HMENU)IDC_BTN_ADV_OK, inst, NULL);
@@ -4697,14 +4798,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnInputCancel = CreateWindowExW(0, L"BUTTON", text(STR_COMP_CANCEL),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 110, 32, hWnd, (HMENU)IDC_BTN_INPUT_CANCEL, inst, NULL);
-            g_hEditCustom = CreateWindowExW(0, L"EDIT", L"",
-                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+            g_hEditCustom = CreateWindowExW(0, GB_INPUT_CLASS, L"",
+                WS_CHILD | WS_TABSTOP,
                 0, 0, 220, 28, hWnd, (HMENU)IDC_EDIT_CUSTOM, inst, NULL);
             SendMessageW(g_hEditCustom, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
-            SendMessageW(g_hEditCustom, EM_SETLIMITTEXT, 4, 0);
-            g_edit_old_proc = (WNDPROC)SetWindowLongPtrW(g_hEditCustom, GWLP_WNDPROC,
-                                                        (LONG_PTR)custom_edit_proc);
-            g_brushLightest = CreateSolidBrush(GB_LIGHTEST);
             g_hBtnMin = CreateWindowExW(0, L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 26, 24, hWnd, (HMENU)IDC_BTN_MIN, inst, NULL);

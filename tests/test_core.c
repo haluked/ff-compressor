@@ -551,6 +551,8 @@ static void test_encode_options(void)
     src.audio_tracks[1].bitrate = 128000;
     opt.downmix_stereo = 0;
     CHECK(!encode_audio_downmix_track(&src, &opt, 1), "downmix can be disabled");
+    CHECK(encode_any_downmix_possible(&src, &opt),
+          "downmix control stays visible while downmix is off");
     opt.audio_codec = ENC_ACODEC_MP3;
     CHECK(encode_audio_downmix_track(&src, &opt, 1), "MP3 always downmixes");
 
