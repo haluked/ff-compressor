@@ -70,5 +70,6 @@ The test screens are transient; the cards are the normal quality-step state.
 
 The tutorial images `02-quality.png` and `04-settings.png` were refreshed for
 the same build. The quality cards now show the active encoder's CRF/CQ/gq/QP
-value under every preset. They also show video-only source→target estimates;
-the compress screen adds the selected audio and the total.
+value under every preset, and the `ENCODER` chip can switch between Auto,
+CPU x265 and the tested GPU encoders. They also show video-only source→target
+estimates; the compress screen adds the selected audio and the total.

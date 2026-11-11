@@ -404,7 +404,8 @@ static void sample_positions(double duration, int clips, double clip_sec, double
 }
 
 EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
-                            int profile_override, int deep, EstimateSet *out,
+                            int profile_override, int deep, int forced_encoder,
+                            EstimateSet *out,
                             EstimateProgressCallback cb, void *user,
                             volatile int *cancel)
 {
@@ -437,7 +438,8 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
     out->clip_seconds = clip_sec;
     for (li = 0; li < level_count; li++) out->levels_used[li] = levels[li];
 
-    encoder = estimate_choose_encoder(src, hw);
+    encoder = (forced_encoder >= 0) ? forced_encoder
+                                    : estimate_choose_encoder(src, hw);
     out->encoder = encoder;
     make_temp_dir(tempdir, UTIL_PATH_MAX);
     sample_positions(src->duration, clips, clip_sec, positions);

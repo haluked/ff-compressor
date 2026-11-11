@@ -66,7 +66,7 @@ int wmain(int argc, wchar_t **argv)
                 src.fps, src.display_width, src.display_height,
                 hw.speed8_median[hw.recommended]);
 
-        er = estimate_run(&src, &hw, HW_PROFILE_AUTO, 0, &est, quiet_progress, NULL, NULL);
+        er = estimate_run(&src, &hw, HW_PROFILE_AUTO, 0, -1, &est, quiet_progress, NULL, NULL);
         if (er != ESTIMATE_OK) {
             wprintf(L"ESTIMATE_FAIL file=%ls result=%d\n", src.file_name, (int)er);
             continue;

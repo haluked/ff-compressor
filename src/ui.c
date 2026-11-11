@@ -200,6 +200,11 @@ static int g_adv_enc_count = 0;
 static wchar_t g_adv_q_items[7][64];
 static int g_quality_show_details = 0;
 static int g_quality_deep = 0;
+static int g_quality_encoder = -1;
+static wchar_t g_quality_enc_items[HW_ENC_COUNT + 1][64];
+static int g_quality_enc_map[HW_ENC_COUNT + 1];
+static int g_quality_enc_count = 0;
+static RECT g_rc_q_encoder;
 static int g_custom_est_testing = 0;
 static int g_custom_est_ready = 0;
 static int g_custom_est_gen = 0;
@@ -1397,18 +1402,14 @@ static void draw_quality(HDC hdc)
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             draw_chip(hdc, &g_rc_q_custom, text(STR_QUALITY_CUSTOM));
 
-            SetRect(&sr, S(32), S(306), S(490), S(322));
-            _snwprintf(buf, 512, text(STR_QUALITY_ENCODER_FMT), hw_encoder_name(enc));
-            if (g_est.used_fallback) {
-                wcscat(buf, L"  ");
-                wcscat(buf, text(STR_QUALITY_FALLBACK));
-            }
+            SetRect(&g_rc_q_encoder, S(32), S(306), S(390), S(326));
+            _snwprintf(buf, 512, text(STR_QUALITY_ENCODER_PICK_FMT),
+                       hw_encoder_name(enc));
             buf[511] = L'\0';
-            gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            draw_chip(hdc, &g_rc_q_encoder, buf);
             draw_chip(hdc, &g_rc_q_details, text(STR_QUALITY_DETAILS));
 
-            SetRect(&sr, S(32), S(322), S(614), S(340));
+            SetRect(&sr, S(32), S(326), S(614), S(342));
             if (sel && sel->available && sel->video_bps > 0.0 && src_video_bps > 0.0) {
                 wchar_t ssrc[64], sdst[64], brs[64], brd[64];
                 util_format_bytes((long long)src_video_bytes, ssrc, 64);
@@ -1422,7 +1423,7 @@ static void draw_quality(HDC hdc)
                 gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             }
-            SetRect(&sr, S(32), S(342), S(614), S(358));
+            SetRect(&sr, S(32), S(344), S(614), S(358));
             gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_COMPAT),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             SetRect(&sr, S(32), S(360), S(614), S(376));
@@ -2853,6 +2854,7 @@ typedef struct {
     HwInfo hw;
     int profile;
     int deep;
+    int encoder_override;
 } EstimateJob;
 
 static void quality_progress_cb(const EstimateProgress *p, void *user)
@@ -2880,7 +2882,8 @@ static DWORD WINAPI quality_thread_proc(LPVOID param)
     }
     msg->gen = job->gen;
     result = estimate_run(&job->src, &job->hw, job->profile, job->deep,
-                          &msg->est, quality_progress_cb, job, &g_est_cancel);
+                          job->encoder_override, &msg->est,
+                          quality_progress_cb, job, &g_est_cancel);
     msg->result = result;
     if (!PostMessageW(job->hwnd, WM_APP_EST_DONE, 0, (LPARAM)msg)) free(msg);
     free(job);
@@ -2911,7 +2914,8 @@ static void quality_ui_start(HWND hWnd, int force)
     g_est_start_tick = GetTickCount64();
     memset(&g_est, 0, sizeof(g_est));
     memset(&g_est_progress, 0, sizeof(g_est_progress));
-    g_est.encoder = estimate_choose_encoder(&g_info, &g_hw_info);
+    g_est.encoder = (g_quality_encoder >= 0) ? g_quality_encoder
+                                             : estimate_choose_encoder(&g_info, &g_hw_info);
     g_est_seconds = (g_quality_last_seconds > 0.0)
         ? (int)(g_quality_last_seconds + 0.5)
         : estimate_demo_seconds(&g_info, &g_hw_info, quality_current_profile());
@@ -2935,6 +2939,7 @@ static void quality_ui_start(HWND hWnd, int force)
     job->hw = g_hw_info;
     job->profile = quality_current_profile();
     job->deep = g_quality_deep;
+    job->encoder_override = g_quality_encoder;
     thread = CreateThread(NULL, 0, quality_thread_proc, job, 0, NULL);
     if (thread) {
         CloseHandle(thread);
@@ -2951,6 +2956,72 @@ static void quality_ui_start_deep(HWND hWnd)
     if (!g_has_info || g_quality_testing) return;
     g_quality_deep = 1;
     quality_ui_start(hWnd, 1);
+}
+
+static void quality_ui_refresh_encoder_items(void)
+{
+    int i;
+    g_quality_enc_count = 0;
+    g_quality_enc_map[g_quality_enc_count] = -1;
+    wcsncpy(g_quality_enc_items[g_quality_enc_count], text(STR_QUALITY_ENC_AUTO), 63);
+    g_quality_enc_items[g_quality_enc_count][63] = L'\0';
+    g_quality_enc_count++;
+
+    g_quality_enc_map[g_quality_enc_count] = HW_ENC_X265;
+    wcsncpy(g_quality_enc_items[g_quality_enc_count], text(STR_QUALITY_ENC_CPU), 63);
+    g_quality_enc_items[g_quality_enc_count][63] = L'\0';
+    g_quality_enc_count++;
+
+    for (i = 0; i < HW_ENC_COUNT && g_quality_enc_count < HW_ENC_COUNT + 1; i++) {
+        if (i == HW_ENC_X265) continue;
+        if (!g_hw_info.enc_ok8[i] && !g_hw_info.enc_ok10[i]) continue;
+        g_quality_enc_map[g_quality_enc_count] = i;
+        _snwprintf(g_quality_enc_items[g_quality_enc_count], 64,
+                   text(STR_QUALITY_ENC_GPU_FMT), hw_encoder_name(i));
+        g_quality_enc_items[g_quality_enc_count][63] = L'\0';
+        g_quality_enc_count++;
+    }
+    {
+        int found = 0;
+        for (i = 0; i < g_quality_enc_count; i++) {
+            if (g_quality_enc_map[i] == g_quality_encoder) { found = 1; break; }
+        }
+        if (!found) {
+            g_quality_encoder = -1;
+            if (g_enc_options_ready) g_enc_opt.encoder_override = -1;
+        }
+    }
+}
+
+static void quality_ui_encoder_picked(int index, void *user)
+{
+    (void)user;
+    if (index < 0 || index >= g_quality_enc_count) return;
+    g_quality_encoder = g_quality_enc_map[index];
+    if (!g_enc_options_ready) {
+        encode_options_defaults(&g_enc_opt, &g_info);
+        g_enc_options_ready = 1;
+    }
+    g_enc_opt.encoder_override = g_quality_encoder;
+    quality_ui_start(g_hWnd, 1);
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void quality_ui_open_encoder_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[HW_ENC_COUNT + 1];
+    RECT anchor;
+    int i, selected = 0;
+
+    quality_ui_refresh_encoder_items();
+    for (i = 0; i < g_quality_enc_count; i++) {
+        ptrs[i] = g_quality_enc_items[i];
+        if (g_quality_enc_map[i] == g_quality_encoder) selected = i;
+    }
+    anchor = g_rc_q_encoder;
+    gb_dropdown_open(hWnd, &anchor, ptrs, g_quality_enc_count, selected,
+                     quality_ui_encoder_picked, NULL);
 }
 
 static void quality_ui_on_done(HWND hWnd, EstimateDoneMsg *msg)
@@ -3049,6 +3120,10 @@ static void quality_select_at(HWND hWnd, int x, int y)
                 return;
             }
         } else {
+            if (PtInRect(&g_rc_q_encoder, pt)) {
+                quality_ui_open_encoder_dropdown(hWnd);
+                return;
+            }
             if (PtInRect(&g_rc_q_custom, pt)) {
                 encode_ui_open_advanced(hWnd);
                 return;
@@ -3066,7 +3141,7 @@ static void quality_select_at(HWND hWnd, int x, int y)
                 int level = g_est.levels_used[i];
                 g_quality_selected = level;
                 g_enc_opt.crf_override = 0;
-                g_enc_opt.encoder_override = -1;
+                g_enc_opt.encoder_override = g_quality_encoder;
                 g_custom_est_ready = 0;
                 quality_load_preview();
                 InvalidateRect(hWnd, NULL, FALSE);
@@ -3080,7 +3155,7 @@ static void quality_select_at(HWND hWnd, int x, int y)
             int level = g_est.levels_used[i];
             g_quality_selected = level;
             g_enc_opt.crf_override = 0;
-            g_enc_opt.encoder_override = -1;
+            g_enc_opt.encoder_override = g_quality_encoder;
             g_custom_est_ready = 0;
             InvalidateRect(hWnd, NULL, FALSE);
             return;
@@ -3099,6 +3174,7 @@ static void quality_ui_reset(void)
     memset(&g_est, 0, sizeof(g_est));
     memset(&g_est_progress, 0, sizeof(g_est_progress));
     g_quality_selected = QUALITY_BALANCED;
+    g_quality_encoder = -1;
     encode_ui_reset();
 }
 

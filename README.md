@@ -46,7 +46,10 @@ previous measured duration is shown.
 
 `DETAILS` shows the actual x265 CRF, QSV, NVENC and AMF value behind each preset.
 `DEEP ANALYZE` re-samples long/grainy films with 4 × 6s clips instead of 3 × 4s.
-The cards show video-only size; audio is added on the next screen.
+The cards show video-only size; audio is added on the next screen. The
+`ENCODER` chip switches between Auto, CPU x265 and any tested GPU encoder
+(Intel QSV, NVIDIA NVENC, AMD AMF); changing it re-runs the preset test with
+that encoder so the sizes and CRF/CQ/gq/QP values stay in sync.
 
 ![Preset details](docs/screenshots/m7-quality-details.png)
 

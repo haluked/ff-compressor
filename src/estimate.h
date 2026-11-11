@@ -72,7 +72,8 @@ int estimate_demo_seconds(const SourceInfo *src, const HwInfo *hw, int profile_o
 int estimate_next_encoder(int current, int failed, int *fell_back);
 
 EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
-                            int profile_override, int deep, EstimateSet *out,
+                            int profile_override, int deep, int forced_encoder,
+                            EstimateSet *out,
                             EstimateProgressCallback cb, void *user,
                             volatile int *cancel);
 
