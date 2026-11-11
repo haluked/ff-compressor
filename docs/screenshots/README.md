@@ -69,5 +69,6 @@ The test screens are transient; the cards are the normal quality-step state.
   absolute stream indices.
 
 The tutorial images `02-quality.png` and `04-settings.png` were refreshed for
-the same build. They show video-only source→target estimates on the quality
-screen and the video/audio/total breakdown on the compress screen.
+the same build. The quality cards now show the active encoder's CRF/CQ/gq/QP
+value under every preset. They also show video-only source→target estimates;
+the compress screen adds the selected audio and the total.

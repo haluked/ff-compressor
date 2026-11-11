@@ -1205,6 +1205,20 @@ static void draw_chip(HDC hdc, const RECT *rc, const wchar_t *label)
             DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
+static void preset_quality_hint(int encoder, int level, wchar_t *out, size_t cap)
+{
+    int q = presets_quality_value(encoder, level, PRESETS_VIDEO_HEVC);
+    if (!out || cap == 0) return;
+    switch (encoder) {
+        case HW_ENC_NVENC: _snwprintf(out, cap, L"NVENC CQ %d", q); break;
+        case HW_ENC_QSV:   _snwprintf(out, cap, L"QSV gq %d", q); break;
+        case HW_ENC_AMF:   _snwprintf(out, cap, L"AMF QP %d", q); break;
+        case HW_ENC_X265:
+        default:           _snwprintf(out, cap, L"x265 CRF %d", q); break;
+    }
+    out[cap - 1] = L'\0';
+}
+
 static void draw_quality(HDC hdc)
 {
     wchar_t buf[512];
@@ -1214,6 +1228,8 @@ static void draw_quality(HDC hdc)
     int levels[ESTIMATE_MAX_LEVELS];
     int count;
     int i;
+    int enc = g_quality_has_result ? g_est.encoder
+                                   : estimate_choose_encoder(&g_info, &g_hw_info);
     int x = S(32), y = S(140), gap = S(8), card_h = S(140);
     int card_w;
 
@@ -1254,8 +1270,15 @@ static void draw_quality(HDC hdc)
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
         {
-            RECT nr = { r.left + S(8), r.top + S(30), r.right - S(8), r.top + S(48) };
+            RECT nr = { r.left + S(8), r.top + S(28), r.right - S(8), r.top + S(42) };
             gb_text(hdc, g_fontSmall, ink, &nr, presets_level_note(level),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+        {
+            wchar_t hint[64];
+            RECT qr = { r.left + S(8), r.top + S(42), r.right - S(8), r.top + S(54) };
+            preset_quality_hint(enc, level, hint, 64);
+            gb_text(hdc, g_fontSmall, selected ? ink : GB_DARK, &qr, hint,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
 
@@ -1317,8 +1340,6 @@ static void draw_quality(HDC hdc)
     /* Selected summary, preset details and notes. */
     {
         EstimateLevel *sel = quality_level_result(g_quality_selected);
-        int enc = g_quality_has_result ? g_est.encoder
-                                       : estimate_choose_encoder(&g_info, &g_hw_info);
         double src_video_bps = g_info.video_bitrate > 0
             ? (double)g_info.video_bitrate : (double)g_info.format_bitrate;
         double src_video_bytes = src_video_bps * g_info.duration / 8.0;
@@ -2828,6 +2849,10 @@ static void quality_ui_update_selection(void)
 typedef struct {
     HWND hwnd;
     int gen;
+    SourceInfo src;
+    HwInfo hw;
+    int profile;
+    int deep;
 } EstimateJob;
 
 static void quality_progress_cb(const EstimateProgress *p, void *user)
@@ -2854,9 +2879,8 @@ static DWORD WINAPI quality_thread_proc(LPVOID param)
         return 0;
     }
     msg->gen = job->gen;
-    result = estimate_run(&g_info, &g_hw_info, quality_current_profile(),
-                          g_quality_deep, &msg->est,
-                          quality_progress_cb, job, &g_est_cancel);
+    result = estimate_run(&job->src, &job->hw, job->profile, job->deep,
+                          &msg->est, quality_progress_cb, job, &g_est_cancel);
     msg->result = result;
     if (!PostMessageW(job->hwnd, WM_APP_EST_DONE, 0, (LPARAM)msg)) free(msg);
     free(job);
@@ -2907,6 +2931,10 @@ static void quality_ui_start(HWND hWnd, int force)
     }
     job->hwnd = hWnd;
     job->gen = g_quality_gen;
+    job->src = g_info;
+    job->hw = g_hw_info;
+    job->profile = quality_current_profile();
+    job->deep = g_quality_deep;
     thread = CreateThread(NULL, 0, quality_thread_proc, job, 0, NULL);
     if (thread) {
         CloseHandle(thread);
@@ -3680,6 +3708,7 @@ typedef struct {
     int quality;
     int clips;
     double clip_seconds;
+    SourceInfo src;
 } CustomEstJob;
 
 static DWORD WINAPI custom_est_thread_proc(LPVOID param)
@@ -3689,7 +3718,7 @@ static DWORD WINAPI custom_est_thread_proc(LPVOID param)
     msg = (CustomEstDoneMsg*)calloc(1, sizeof(CustomEstDoneMsg));
     if (!msg) { free(job); return 0; }
     msg->gen = job->gen;
-    msg->result = estimate_run_custom(&g_info, &g_hw_info, job->encoder,
+    msg->result = estimate_run_custom(&job->src, NULL, job->encoder,
                                       job->video_codec, job->quality,
                                       job->video_track, job->clips,
                                       job->clip_seconds, &msg->est,
@@ -3735,6 +3764,7 @@ static void encode_ui_start_custom_test(HWND hWnd)
     job->video_codec = g_enc_opt.video_codec;
     job->video_track = encode_selected_video_track(&g_info, &g_enc_opt);
     job->quality = quality;
+    job->src = g_info;
     job->clips = 4;
     job->clip_seconds = 4.0;
     thread = CreateThread(NULL, 0, custom_est_thread_proc, job, 0, NULL);

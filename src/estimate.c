@@ -133,6 +133,16 @@ int estimate_plan(const SourceInfo *src, int profile,
         clip_count = 3;
         clip_len = 4.0;
     }
+    /* Long films have far more scene variety than a 12s sample can show.
+       Increase the sample budget automatically instead of relying on the user
+       to press DEEP ANALYZE. */
+    if (profile != HW_PROFILE_LIGHT && src->duration > 1800.0) {
+        if (clip_count < 4) clip_count = 4;
+        if (clip_len < 5.0) clip_len = 5.0;
+    }
+    if (profile != HW_PROFILE_LIGHT && src->duration > 5400.0) {
+        clip_len = 6.0;
+    }
     count = presets_available_levels(profile, levels);
 
     if (src->duration <= 0.0) {
@@ -583,6 +593,18 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
                     video_bps = (mean_bps + max_bps) / 2.0;
                 }
             }
+            /* Hardware quality scales are less predictable than x265 CRF.
+               High-bpp remuxes (grain, old masters) tend to need more bits
+               than a short sample suggests, so add a conservative factor. */
+            if (encoder != HW_ENC_X265) {
+                double bpp = src->bits_per_pixel;
+                double factor = 1.0;
+                if (bpp > 0.50) factor = 1.50;
+                else if (bpp > 0.35) factor = 1.35;
+                else if (bpp > 0.22) factor = 1.20;
+                else if (bpp > 0.12) factor = 1.10;
+                video_bps *= factor;
+            }
 
             if (src->audio_track_count > 0) {
                 long long total = encode_audio_total_bitrate(src);
@@ -752,6 +774,15 @@ EstimateResult estimate_run_custom(const SourceInfo *src, const HwInfo *hw,
             if (max_bps > mean_bps * 1.15) {
                 video_bps = (mean_bps + max_bps) / 2.0;
             }
+        }
+        if (encoder != HW_ENC_X265 && video_codec != PRESETS_VIDEO_H264) {
+            double bpp = src->bits_per_pixel;
+            double factor = 1.0;
+            if (bpp > 0.50) factor = 1.50;
+            else if (bpp > 0.35) factor = 1.35;
+            else if (bpp > 0.22) factor = 1.20;
+            else if (bpp > 0.12) factor = 1.10;
+            video_bps *= factor;
         }
 
         size = video_bps * src->duration / 8.0 * 1.01;

@@ -525,11 +525,12 @@ void gb_draw_control(const DRAWITEMSTRUCT *dis, HFONT font, int role,
 /* ---------------------------------------------------------------- popup */
 
 #define GB_DROP_CLASS L"GbDropPopupWnd"
+#define GB_DROP_MAX_ITEMS 80
 
 typedef struct {
     HWND hwnd;
     HWND owner;
-    const wchar_t *const *items;
+    const wchar_t *items[GB_DROP_MAX_ITEMS];
     int count;
     int selected;
     int hover;
@@ -705,6 +706,7 @@ int gb_dropdown_open(HWND owner, const RECT *anchor,
     int text_px;
 
     if (!owner || !anchor || !items || count <= 0) return 0;
+    if (count > GB_DROP_MAX_ITEMS) count = GB_DROP_MAX_ITEMS;
 
     gb_dropdown_close();
 
@@ -723,7 +725,7 @@ int gb_dropdown_open(HWND owner, const RECT *anchor,
 
     memset(&g_drop, 0, sizeof(g_drop));
     g_drop.owner = owner;
-    g_drop.items = items;
+    for (i = 0; i < count; i++) g_drop.items[i] = items[i];
     g_drop.count = count;
     g_drop.selected = selected >= 0 && selected < count ? selected : 0;
     g_drop.hover = g_drop.selected;
