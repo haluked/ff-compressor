@@ -23,10 +23,21 @@ int presets_video_args(const SourceInfo *src, int encoder, int level,
 int presets_video_args_ex(const SourceInfo *src, int encoder, int level,
                           int video_codec, wchar_t *out, size_t cap);
 
+int presets_video_args_crf(const SourceInfo *src, int encoder, int video_codec,
+                           int quality, wchar_t *out, size_t cap);
+
+int presets_quality_value(int encoder, int level, int video_codec);
+
 int presets_build_sample_cmd(const SourceInfo *src, int encoder, int level,
                              double start_sec, double duration_sec,
                              const wchar_t *out_path,
                              wchar_t *cmd, size_t cap);
+
+int presets_build_sample_cmd_crf(const SourceInfo *src, int encoder,
+                                 int video_codec, int quality,
+                                 double start_sec, double duration_sec,
+                                 const wchar_t *out_path,
+                                 wchar_t *cmd, size_t cap);
 
 int presets_build_full_cmd(const SourceInfo *src, int encoder, int level,
                            const wchar_t *out_path, int include_audio,

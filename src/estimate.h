@@ -24,6 +24,9 @@ typedef struct {
     int ssim_available;
     int clips;
     double clip_seconds;
+    double video_bps;
+    double audio_bps;
+    double video_size_bytes;
 } EstimateLevel;
 
 typedef struct {
@@ -69,9 +72,17 @@ int estimate_demo_seconds(const SourceInfo *src, const HwInfo *hw, int profile_o
 int estimate_next_encoder(int current, int failed, int *fell_back);
 
 EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
-                            int profile_override, EstimateSet *out,
+                            int profile_override, int deep, EstimateSet *out,
                             EstimateProgressCallback cb, void *user,
                             volatile int *cancel);
+
+EstimateResult estimate_run_custom(const SourceInfo *src, const HwInfo *hw,
+                                   int encoder, int video_codec, int quality,
+                                   int video_track,
+                                   int clips, double clip_seconds,
+                                   EstimateLevel *out,
+                                   EstimateProgressCallback cb, void *user,
+                                   volatile int *cancel);
 
 void estimate_cleanup_preview_dir(EstimateSet *set);
 

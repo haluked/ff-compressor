@@ -38,11 +38,19 @@ counts. `DETAILS` opens the technical view. Press `CONTINUE` when ready.
 ### 2. Compare quality levels
 
 `CONTINUE` runs the sample test: several short clips at the available quality
-levels. Each card shows an estimated final size, estimated time, savings and
-median SSIM. `TEST AGAIN` repeats the test after a confirmation; the previous
-measured duration is shown.
+levels. Each card shows an estimated video-only size, estimated time, video
+savings and median SSIM. `TEST AGAIN` repeats the test after a confirmation; the
+previous measured duration is shown.
 
 ![Quality cards](docs/tutorial/02-quality.png)
+
+`DETAILS` shows the actual x265 CRF, QSV, NVENC and AMF value behind each preset.
+`DEEP ANALYZE` re-samples long/grainy films with 4 × 6s clips instead of 3 × 4s.
+The cards show video-only size; audio is added on the next screen.
+
+![Preset details](docs/screenshots/m7-quality-details.png)
+
+![Advanced encoder and quality](docs/screenshots/m7-advanced.png)
 
 ### 3. Inspect the frames
 
@@ -58,10 +66,18 @@ tone-mapped to SDR for display.
 `COMPRESS` opens the third step. MKV is the default container; MP4 is available
 for wider device support. H.265 is the default video codec; H.264 is the
 maximum-compatibility option. Audio and bitrate choices are filtered by the
-container, all audio tracks are kept, and the destination is shown before you
-start.
+container, audio tracks and subtitle tracks can be selected individually (or
+dropped entirely), and the destination is shown before you start.
 
 ![Compression settings](docs/tutorial/04-settings.png)
+
+`ADVANCED` adds encoder selection (Auto/CPU x265/NVENC/QSV/AMF), preset,
+`ARCHIVE` (CPU x265 CRF 19) and custom CRF. `APPLY & TEST` samples that exact
+setting before updating the size/time estimate.
+
+![Audio track selection](docs/screenshots/m7-audio-tracks.png)
+
+![Subtitle track selection](docs/screenshots/m7-subtitle-tracks.png)
 
 ### 5. Compress
 
@@ -153,31 +169,54 @@ files.
   the default video codec and uses the tested hardware encoder with CPU x265
   fallback. H.264 is always CPU x264 for maximum compatibility. HDR sources
   encoded as H.264 are tone-mapped to SDR and tagged BT.709.
+- The `ADVANCED` panel overrides the encoder and quality: Auto, CPU x265,
+  NVIDIA NVENC, Intel QSV or AMD AMF, plus preset, `ARCHIVE` (CPU x265 CRF 19)
+  or a custom CRF/quality value. Applying a changed setting runs a short sample
+  test for that exact encoder/quality and updates the size/time estimate before
+  compression starts. Hardware quality numbers are not CRF; the panel says so.
+- The quality screen has a `DETAILS` view that lists the actual CRF/QSV/NVENC/AMF
+  value behind every preset, and a `DEEP ANALYZE` action that samples 4 x 6s
+  clips instead of the normal 3 x 4s for long or grainy films.
+- Estimates are video-only on the quality screen. The UI shows the real source
+  video size/codec/bitrate and the target size/codec/bitrate, e.g.
+  `VIDEO 36.56 GB H.264 29.88 Mbps -> ~8.2 GB HEVC 6.3 Mbps`. Audio is accounted
+  for on the compress screen, where the same source -> target breakdown is shown
+  for the selected audio tracks.
 - Audio choices are filtered by container and kept in the requested order:
   Copy, Opus (default), AAC, MP3, FLAC, AC-3, E-AC-3, Vorbis. MP4 hides Opus,
   FLAC and Vorbis. Bitrates are Voice 24k / Music 36k / High 64k / Custom, with
   no bitrate for Copy or FLAC. A custom value can be typed directly (16–512
   kbps; 64 kbps minimum for AC-3/E-AC-3). The Opus compatibility note stays
   visible for MKV.
-- All audio tracks are kept. If a track's source bitrate is already below the
-  selected target, that track is copied instead of re-encoded. Multichannel
+- Audio tracks are selectable on the compress screen. `ALL n TRACKS` keeps
+  every track, `NO AUDIO` drops all of them, and the track menu lists each
+  stream with its language/title, codec, channel layout and bitrate, so e.g.
+  only the original Polish 5.1 track can be kept. Selection drives explicit maps
+  and per-stream encoder options. If a track's source bitrate is already below
+  the selected target, that track is copied instead of re-encoded. Multichannel
   tracks that are being re-encoded are proposed for stereo downmix (on by
-  default; MP3/AC-3/E-AC-3 always use stereo). Copy and FLAC keep their
-  channels.
-- Subtitles: MKV copies every subtitle track as-is. MP4 converts text tracks to
-  `mov_text`; bitmap tracks (PGS/DVD/DVB) cannot be stored in MP4, so the app
-  shows how many will be dropped and asks for confirmation before starting.
+  default; MP3/AC-3/E-AC-3 always use stereo). Copy and FLAC keep their channels.
+- Subtitle tracks are selectable too: `ALL n SUBTITLES`, `NO SUBTITLES` or a
+  single track. MKV copies the selected tracks as-is; MP4 converts selected text
+  tracks to `mov_text` and drops selected bitmap tracks (with confirmation).
+- Opus/Vorbis receive an encoder-safe channel layout and 48 kHz output. This
+  fixes `libopus` aborting with `Invalid channel layout 5.1(side)` or
+  `7.1(wide)` when surround is kept instead of downmixed.
+- If the source has several moving-picture streams, a `VIDEO n/m` menu appears
+  and the chosen stream is mapped by its absolute ffprobe index. Cover art
+  (`attached_pic`) is never selected as the primary video.
 - Output goes to a `Compressed` folder next to the source. The name is
   `<name> (compressed).<ext>` with a numeric suffix if it already exists. The
   original file is never written to or overwritten. FFmpeg writes a `.partial`
   file first; it is renamed only after a successful encode.
 - After encoding, `ffprobe` verifies the output: video and duration exist, the
-  display resolution matches, and the audio/subtitle track counts match the
-  plan. A failed verification deletes the partial output and reports an error.
+  display resolution and the planned audio/subtitle track counts match. A failed
+  verification deletes the partial output and reports an error.
 - The progress view shows percentage, elapsed time, speed and the quality-step
   time estimate. `CANCEL` stops FFmpeg and deletes the partial file.
-- Explicit stream maps are used (`-map 0:v:0`, all audio, planned subtitles),
-  with metadata and chapters copied and data streams dropped.
+- Explicit stream maps are used (selected video by absolute index, selected
+  audio by absolute index, selected subtitles), with metadata and chapters
+  copied and data streams dropped.
 
 All three steps are active. The release package is built with
 `tools\make-release.ps1`.

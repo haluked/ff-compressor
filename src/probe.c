@@ -95,6 +95,32 @@ static int is_sar_square(const wchar_t *sar)
     return 0;
 }
 
+static int stream_rotation(cJSON *s)
+{
+    cJSON *side = obj(s, "side_data_list");
+    int rotation = 0;
+
+    if (cJSON_IsArray(side)) {
+        int sn = cJSON_GetArraySize(side);
+        int k;
+        for (k = 0; k < sn; k++) {
+            cJSON *sd = cJSON_GetArrayItem(side, k);
+            cJSON *rot = sd ? obj(sd, "rotation") : NULL;
+            if (rot && cJSON_IsNumber(rot)) rotation = (int)rot->valuedouble;
+        }
+    }
+    if (rotation == 0) {
+        cJSON *tags = obj(s, "tags");
+        if (tags && cJSON_IsObject(tags)) {
+            cJSON *rot = obj(tags, "rotate");
+            if (rot && cJSON_IsString(rot) && rot->valuestring) rotation = atoi(rot->valuestring);
+            else if (rot && cJSON_IsNumber(rot)) rotation = (int)rot->valuedouble;
+        }
+    }
+    if (rotation < 0) rotation = -rotation;
+    return rotation % 360;
+}
+
 static void recompute_derived(SourceInfo *out)
 {
     if (out->format_bitrate <= 0 && out->duration > 0.0 && out->file_size > 0) {
@@ -127,6 +153,7 @@ ProbeError probe_parse_json(const char *json, SourceInfo *out)
 
     if (!out) return PROBE_ERR_BAD_JSON;
     memset(out, 0, sizeof(*out));
+    out->video_primary = -1;
     if (!json || !*json) return PROBE_ERR_BAD_JSON;
 
     root = cJSON_Parse(json);
@@ -155,20 +182,78 @@ ProbeError probe_parse_json(const char *json, SourceInfo *out)
 
             if (strcmp(t, "video") == 0) {
                 cJSON *disp = obj(s, "disposition");
+                cJSON *idx = obj(s, "index");
                 int attached_pic = 0;
-                if (disp && cJSON_IsObject(disp)) attached_pic = get_int(disp, "attached_pic");
+                int is_default = 0;
+                int stored = -1;
+                if (disp && cJSON_IsObject(disp)) {
+                    attached_pic = get_int(disp, "attached_pic");
+                    is_default = get_int(disp, "default");
+                }
                 out->video_track_count++;
-                if (!video && !attached_pic) video = s;
+                if (!attached_pic) out->video_real_count++;
+                if (out->video_tracks_stored < PROBE_MAX_VIDEO_TRACKS) {
+                    VideoTrackInfo *vt = &out->video_tracks[out->video_tracks_stored];
+                    stored = out->video_tracks_stored++;
+                    memset(vt, 0, sizeof(*vt));
+                    vt->index = get_int(s, "index");
+                    vt->has_index = (idx != NULL);
+                    vt->default_track = is_default;
+                    vt->attached_pic = attached_pic;
+                    get_str(s, "codec_name", vt->codec, 64);
+                    get_str(s, "profile", vt->profile, 64);
+                    vt->width = get_int(s, "width");
+                    vt->height = get_int(s, "height");
+                    vt->rotation = stream_rotation(s);
+                    vt->display_width = vt->width;
+                    vt->display_height = vt->height;
+                    if (vt->rotation == 90 || vt->rotation == 270) {
+                        vt->display_width = vt->height;
+                        vt->display_height = vt->width;
+                    }
+                    vt->bitrate = get_ll(s, "bit_rate");
+                    {
+                        cJSON *avg = obj(s, "avg_frame_rate");
+                        vt->fps = (avg && cJSON_IsString(avg))
+                            ? parse_ratio(avg->valuestring) : 0.0;
+                    }
+                }
+                if (!attached_pic) {
+                    if (!video) {
+                        video = s;
+                        if (stored >= 0) out->video_primary = stored;
+                    } else if (stored >= 0 && out->video_primary >= 0) {
+                        VideoTrackInfo *cur = &out->video_tracks[out->video_primary];
+                        long long cur_area = (long long)cur->width * cur->height;
+                        long long new_area = (long long)get_int(s, "width") * get_int(s, "height");
+                        int better = 0;
+                        if (is_default && !cur->default_track) better = 1;
+                        else if (is_default == cur->default_track && new_area > cur_area) better = 1;
+                        if (better) {
+                            video = s;
+                            out->video_primary = stored;
+                        }
+                    }
+                }
             } else if (strcmp(t, "audio") == 0) {
                 if (out->audio_tracks_stored < PROBE_MAX_AUDIO_TRACKS) {
                     AudioTrackInfo *at = &out->audio_tracks[out->audio_tracks_stored++];
                     cJSON *tags = obj(s, "tags");
+                    cJSON *disp = obj(s, "disposition");
+                    cJSON *idx = obj(s, "index");
+                    memset(at, 0, sizeof(*at));
+                    at->index = get_int(s, "index");
+                    at->has_index = (idx != NULL);
+                    at->default_track = (disp && cJSON_IsObject(disp))
+                        ? get_int(disp, "default") : 0;
                     get_str(s, "codec_name", at->codec, 64);
+                    get_str(s, "channel_layout", at->layout, 64);
                     at->channels = get_int(s, "channels");
                     at->sample_rate = get_int(s, "sample_rate");
                     at->bitrate = get_ll(s, "bit_rate");
                     if (tags && cJSON_IsObject(tags)) {
                         get_str(tags, "language", at->language, 32);
+                        get_str(tags, "title", at->title, 96);
                     }
                 }
                 out->audio_track_count++;
@@ -177,9 +262,19 @@ ProbeError probe_parse_json(const char *json, SourceInfo *out)
                 if (out->subtitle_tracks_stored < PROBE_MAX_SUBTITLE_TRACKS) {
                     SubtitleTrackInfo *st = &out->subtitle_tracks[out->subtitle_tracks_stored++];
                     cJSON *tags = obj(s, "tags");
+                    cJSON *disp = obj(s, "disposition");
+                    cJSON *idx = obj(s, "index");
+                    memset(st, 0, sizeof(*st));
+                    st->index = get_int(s, "index");
+                    st->has_index = (idx != NULL);
+                    if (disp && cJSON_IsObject(disp)) {
+                        st->default_track = get_int(disp, "default");
+                        st->forced = get_int(disp, "forced");
+                    }
                     get_str(s, "codec_name", st->codec, 64);
                     if (tags && cJSON_IsObject(tags)) {
                         get_str(tags, "language", st->language, 32);
+                        get_str(tags, "title", st->title, 96);
                     }
                 }
                 out->subtitle_track_count++;
@@ -324,7 +419,8 @@ static int cmp_double(const void *a, const void *b)
 /* avg_frame_rate and r_frame_rate are identical for many MKV VFR files.
    Sample the first five seconds of packet timestamps and look for irregular
    spacing. This is metadata-only (no frame decoding) and stays fast. */
-static int detect_vfr_extra(const wchar_t *ffprobe, const wchar_t *path)
+static int detect_vfr_extra(const wchar_t *ffprobe, const wchar_t *path,
+                            int stream_index)
 {
     wchar_t q_tool[UTIL_PATH_MAX + 4];
     wchar_t q_path[UTIL_PATH_MAX + 4];
@@ -340,9 +436,16 @@ static int detect_vfr_extra(const wchar_t *ffprobe, const wchar_t *path)
     if (!util_quote_arg(q_tool, sizeof(q_tool) / sizeof(wchar_t), ffprobe)) return 0;
     if (!util_quote_arg(q_path, sizeof(q_path) / sizeof(wchar_t), path)) return 0;
 
-    _snwprintf(cmd, sizeof(cmd) / sizeof(wchar_t),
-        L"%ls -v error -select_streams v:0 -read_intervals %%+5 "
-        L"-show_entries packet=pts_time -of csv=p=0 %ls", q_tool, q_path);
+    if (stream_index >= 0) {
+        _snwprintf(cmd, sizeof(cmd) / sizeof(wchar_t),
+            L"%ls -v error -select_streams %d -read_intervals %%+5 "
+            L"-show_entries packet=pts_time -of csv=p=0 %ls",
+            q_tool, stream_index, q_path);
+    } else {
+        _snwprintf(cmd, sizeof(cmd) / sizeof(wchar_t),
+            L"%ls -v error -select_streams v:0 -read_intervals %%+5 "
+            L"-show_entries packet=pts_time -of csv=p=0 %ls", q_tool, q_path);
+    }
     cmd[(sizeof(cmd) / sizeof(wchar_t)) - 1] = L'\0';
 
     if (util_run_capture(cmd, PROBE_TIMEOUT_MS, NULL, &buf, &len, &exit_code) != UTIL_RUN_OK) return 0;
@@ -425,7 +528,13 @@ ProbeError probe_run(const wchar_t *path, SourceInfo *out)
     recompute_derived(out);
 
     if (!out->is_vfr) {
-        out->is_vfr = detect_vfr_extra(ffprobe, path);
+        int vfr_stream = -1;
+        if (out->video_primary >= 0 &&
+            out->video_primary < out->video_tracks_stored &&
+            out->video_tracks[out->video_primary].has_index) {
+            vfr_stream = out->video_tracks[out->video_primary].index;
+        }
+        out->is_vfr = detect_vfr_extra(ffprobe, path, vfr_stream);
     }
     return PROBE_OK;
 }

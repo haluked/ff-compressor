@@ -212,6 +212,59 @@ static void test_no_video_and_bad_json(void)
     CHECK(parse(bad, &s) == PROBE_ERR_BAD_JSON, "Broken JSON is rejected");
 }
 
+static void test_multi_track_probe(void)
+{
+    static const char *json =
+        "{"
+        "\"streams\":["
+        "{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"mjpeg\","
+        "\"width\":600,\"height\":600,\"disposition\":{\"attached_pic\":1}},"
+        "{\"index\":1,\"codec_type\":\"video\",\"codec_name\":\"h264\","
+        "\"width\":1920,\"height\":1080,\"pix_fmt\":\"yuv420p\","
+        "\"avg_frame_rate\":\"25/1\",\"r_frame_rate\":\"25/1\","
+        "\"bit_rate\":\"29877000\",\"disposition\":{\"default\":1}},"
+        "{\"index\":2,\"codec_type\":\"video\",\"codec_name\":\"h264\","
+        "\"width\":1280,\"height\":720,\"pix_fmt\":\"yuv420p\","
+        "\"avg_frame_rate\":\"25/1\",\"r_frame_rate\":\"25/1\"},"
+        "{\"index\":3,\"codec_type\":\"audio\",\"codec_name\":\"dts\","
+        "\"channels\":6,\"channel_layout\":\"5.1(side)\",\"sample_rate\":\"48000\","
+        "\"bit_rate\":\"3840000\",\"disposition\":{\"default\":1},"
+        "\"tags\":{\"language\":\"pol\",\"title\":\"Original\"}},"
+        "{\"index\":4,\"codec_type\":\"audio\",\"codec_name\":\"flac\","
+        "\"channels\":2,\"channel_layout\":\"stereo\",\"sample_rate\":\"48000\","
+        "\"bit_rate\":\"820000\",\"tags\":{\"language\":\"rus\"}}"
+        "],"
+        "\"format\":{\"format_name\":\"matroska,webm\",\"duration\":\"10512.0\","
+        "\"size\":\"51027000000\"}"
+        "}";
+    SourceInfo s;
+
+    CHECK(parse(json, &s) == PROBE_OK, "multi-track fixture parses");
+    CHECK(s.video_track_count == 3, "all video streams are counted");
+    CHECK(s.video_real_count == 2, "cover art is excluded from real video count");
+    CHECK(s.video_tracks_stored == 3, "video track details are stored");
+    CHECK(s.video_primary >= 0 && s.video_primary < s.video_tracks_stored,
+          "primary video index is valid");
+    CHECK(s.video_tracks[s.video_primary].index == 1,
+          "primary video uses its absolute stream index");
+    CHECK(s.video_primary == 1, "cover art is not selected as primary video");
+    CHECK(s.display_width == 1920 && s.display_height == 1080,
+          "primary video metadata is used");
+    CHECK(s.audio_track_count == 2 && s.audio_tracks_stored == 2,
+          "audio tracks are stored");
+    CHECK(s.audio_tracks[0].has_index && s.audio_tracks[0].index == 3,
+          "audio absolute stream index is stored");
+    CHECK(s.audio_tracks[0].default_track, "default audio disposition is stored");
+    CHECK(wcscmp(s.audio_tracks[0].layout, L"5.1(side)") == 0,
+          "audio channel layout is stored");
+    CHECK(wcscmp(s.audio_tracks[0].title, L"Original") == 0,
+          "audio title is stored");
+    CHECK(wcscmp(s.audio_tracks[0].language, L"pol") == 0,
+          "audio language is stored");
+    CHECK(s.audio_tracks[1].index == 4 && wcscmp(s.audio_tracks[1].codec, L"flac") == 0,
+          "second audio track metadata is stored");
+}
+
 static void test_hw_profiles(void)
 {
     HwInfo h;
@@ -470,6 +523,67 @@ static void test_encode_options(void)
     opt.audio_codec = ENC_ACODEC_MP3;
     CHECK(encode_audio_downmix_track(&src, &opt, 1), "MP3 always downmixes");
 
+    CHECK(encode_audio_total_bitrate(&src) == 200000, "audio bitrates are summed");
+
+    wcscpy(src.audio_tracks[1].layout, L"5.1(side)");
+    src.audio_tracks[1].has_index = 1;
+    src.audio_tracks[1].index = 7;
+    opt.container = ENC_CONT_MKV;
+    opt.video_codec = ENC_VCODEC_HEVC;
+    opt.audio_codec = ENC_ACODEC_OPUS;
+    opt.bitrate = ENC_ABITRATE_HIGH;
+    opt.custom_kbps = ENC_BITRATE_HIGH_KBPS;
+    opt.downmix_stereo = 0;
+    opt.audio_mask = 1u << 1;
+    CHECK(encode_selected_audio_count(&src, &opt) == 1, "one track is selected");
+    CHECK(!encode_audio_selected(&src, &opt, 0) &&
+          encode_audio_selected(&src, &opt, 1), "selection skips other tracks");
+    err = ENCODE_ERR_NONE;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "selected-track command builds");
+    CHECK(wcsstr(cmd, L"-map 0:7") != NULL, "selected track maps by absolute index");
+    CHECK(wcsstr(cmd, L"-map 0:a:0") == NULL, "unselected tracks are not mapped");
+    CHECK(wcsstr(cmd, L"-c:a:0 libopus") != NULL, "selected track becomes output audio 0");
+    CHECK(wcsstr(cmd, L"-af:a:0 \"aformat=channel_layouts=5.1\"") != NULL,
+          "5.1(side) is remapped to an Opus-safe layout");
+    CHECK(wcsstr(cmd, L"-ar:a:0 48000") != NULL, "Opus output is forced to 48 kHz");
+    CHECK(wcsstr(cmd, L"-ac:a:0 2") == NULL, "no downmix is forced when it is disabled");
+
+    opt.downmix_stereo = 1;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "downmixed command builds");
+    CHECK(wcsstr(cmd, L"-af:a:0 \"aformat=channel_layouts=stereo\"") != NULL,
+          "unsupported layout is explicitly remapped when downmixing");
+    CHECK(encode_estimated_audio_bitrate(&src, &opt) == 64000,
+          "downmixed estimate uses the stereo target");
+    opt.downmix_stereo = 0;
+    CHECK(encode_estimated_audio_bitrate(&src, &opt) == 192000,
+          "surround estimate scales the target for six channels");
+
+    src.video_tracks_stored = 2;
+    src.video_primary = 1;
+    src.video_tracks[1].has_index = 1;
+    src.video_tracks[1].index = 4;
+    src.video_tracks[1].width = 1280;
+    src.video_tracks[1].height = 720;
+    src.video_tracks[1].display_width = 1280;
+    src.video_tracks[1].display_height = 720;
+    opt.video_track = 1;
+    CHECK(encode_selected_video_track(&src, &opt) == 1, "secondary video track is selected");
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "secondary-video command builds");
+    CHECK(wcsstr(cmd, L"-map 0:4") != NULL, "secondary video maps by absolute index");
+    src.video_tracks_stored = 0;
+    src.video_primary = -1;
+    src.audio_tracks[1].has_index = 0;
+    src.audio_tracks[1].index = 0;
+    src.audio_tracks[1].layout[0] = L'\0';
+    opt.audio_mask = 0;
+    opt.video_track = 0;
+
     CHECK(encode_preview_output_path(&src, ENC_CONT_MKV, out, UTIL_PATH_MAX) == 1,
           "preview output path builds");
     CHECK(wcsstr(out, L"Compressed") != NULL, "preview path uses Compressed folder");
@@ -491,14 +605,59 @@ static void test_encode_options(void)
                                L"C:\\videos\\Compressed\\clip (compressed).mkv",
                                cmd, 16384, &err) == 1, "MKV command builds");
     CHECK(wcsstr(cmd, L"-map 0:v:0") != NULL, "command maps video explicitly");
-    CHECK(wcsstr(cmd, L"-map 0:a?") != NULL, "command maps all audio");
-    CHECK(wcsstr(cmd, L"-map 0:s?") != NULL, "command maps all subtitles");
+    CHECK(wcsstr(cmd, L"-map 0:a:0") != NULL, "command maps first audio track");
+    CHECK(wcsstr(cmd, L"-map 0:a:1") != NULL, "command maps second audio track");
+    CHECK(wcsstr(cmd, L"-map 0:a:2") != NULL, "command maps third audio track");
+    CHECK(wcsstr(cmd, L"-map 0:a?") == NULL, "command maps audio individually");
+    CHECK(wcsstr(cmd, L"-map 0:s:0") != NULL, "command maps first subtitle");
+    CHECK(wcsstr(cmd, L"-map 0:s:1") != NULL, "command maps second subtitle");
+    CHECK(wcsstr(cmd, L"-map 0:s?") == NULL, "command maps subtitles individually");
     CHECK(wcsstr(cmd, L"-c:s copy") != NULL, "MKV copies subtitles");
     CHECK(wcsstr(cmd, L"-c:a libopus") != NULL, "Opus encoder is used");
     CHECK(wcsstr(cmd, L"-c:a:2 copy") != NULL, "small audio track overrides to copy");
     CHECK(wcsstr(cmd, L"-ac:a:1 2") != NULL, "5.1 track receives stereo downmix");
     CHECK(wcsstr(cmd, L"-f matroska") != NULL, "MKV muxer is used");
     CHECK(wcsstr(cmd, L"-progress pipe:1") != NULL, "command uses progress pipe");
+
+    opt.subtitle_mask = 1u; /* keep only the text subtitle */
+    opt.subtitles_none = 0;
+    CHECK(encode_selected_subtitle_count(&src, &opt, ENC_CONT_MKV) == 1,
+          "one subtitle is selected");
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "subtitle subset command builds");
+    CHECK(wcsstr(cmd, L"-map 0:s:0") != NULL, "selected subtitle is mapped");
+    CHECK(wcsstr(cmd, L"-map 0:s:1") == NULL, "unselected subtitle is dropped");
+    opt.subtitles_none = 1;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "no-subtitle command builds");
+    CHECK(wcsstr(cmd, L"-map 0:s") == NULL, "drop-all removes subtitle maps");
+    opt.subtitles_none = 0;
+    opt.subtitle_mask = 0;
+
+    opt.audio_none = 1;
+    CHECK(encode_selected_audio_count(&src, &opt) == 0, "all audio can be dropped");
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "no-audio command builds");
+    CHECK(wcsstr(cmd, L"-an") != NULL, "no-audio command uses -an");
+    CHECK(wcsstr(cmd, L"-map 0:a") == NULL, "no-audio command has no audio maps");
+    opt.audio_none = 0;
+
+    CHECK(presets_quality_value(HW_ENC_X265, QUALITY_HIGH, PRESETS_VIDEO_HEVC) == 21,
+          "x265 HIGH quality is CRF 21");
+    CHECK(presets_quality_value(HW_ENC_QSV, QUALITY_HIGH, PRESETS_VIDEO_HEVC) == 25,
+          "QSV HIGH quality is 25");
+    opt.encoder_override = HW_ENC_X265;
+    opt.crf_override = 19;
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "custom CRF command builds");
+    CHECK(wcsstr(cmd, L"libx265") != NULL && wcsstr(cmd, L"-crf 19") != NULL,
+          "custom encoder/CRF override is used");
+    opt.encoder_override = -1;
+    opt.crf_override = 0;
 
     opt.container = ENC_CONT_MP4;
     opt.audio_codec = ENC_ACODEC_AAC;
@@ -605,6 +764,7 @@ int main(void)
     test_legacy_rotation_tag();
     test_opus_webm();
     test_no_video_and_bad_json();
+    test_multi_track_probe();
     test_hw_profiles();
     test_estimates();
     test_encode_options();

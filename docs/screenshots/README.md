@@ -56,3 +56,18 @@ The test screens are transient; the cards are the normal quality-step state.
 - `m6-release-real-done.png` — the packaged v1.0.0 EXE compressing a real
   1080p 60 fps HEVC10 clip from the release folder using its own `bin\ffmpeg`
   and `bin\ffprobe`, with the verified result shown.
+
+## M7 — advanced quality, archive and track editing
+
+- `m7-quality-details.png` — the quality screen `DETAILS` view: each preset's
+  x265 CRF, QSV, NVENC and AMF values, plus the `DEEP ANALYZE` action.
+- `m7-advanced.png` — the `ADVANCED` panel with encoder and quality selection.
+- `m7-archive.png` — `Archive (CPU x265 CRF 19)` selected; the CRF field shows 19.
+- `m7-audio-tracks.png` — audio track menu with `No audio`, absolute ffprobe
+  indices, language/title, codec, channel layout and bitrate.
+- `m7-subtitle-tracks.png` — subtitle track menu with `No subtitles` and the
+  absolute stream indices.
+
+The tutorial images `02-quality.png` and `04-settings.png` were refreshed for
+the same build. They show video-only source→target estimates on the quality
+screen and the video/audio/total breakdown on the compress screen.

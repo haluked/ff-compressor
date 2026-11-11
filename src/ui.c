@@ -53,6 +53,15 @@
 #define IDC_BTN_INPUT_OK 3024
 #define IDC_BTN_INPUT_CANCEL 3025
 #define IDC_EDIT_CUSTOM 3026
+#define IDC_BTN_VIDEO_TRACK 3027
+#define IDC_BTN_AUDIO_TRACK 3028
+#define IDC_BTN_ADVANCED 3029
+#define IDC_BTN_ADV_ENC 3030
+#define IDC_BTN_ADV_Q 3031
+#define IDC_EDIT_CRF 3032
+#define IDC_BTN_ADV_OK 3033
+#define IDC_BTN_ADV_CANCEL 3034
+#define IDC_BTN_SUBTITLE_TRACK 3035
 
 #define BASE_CLIENT_W 646
 #define BASE_CLIENT_H 485
@@ -88,6 +97,15 @@ static HWND g_hBtnVcH264 = NULL;
 static HWND g_hBtnAudio = NULL;
 static HWND g_hBtnABitrate = NULL;
 static HWND g_hBtnDownmix = NULL;
+static HWND g_hBtnVideoTrack = NULL;
+static HWND g_hBtnAudioTrack = NULL;
+static HWND g_hBtnAdvanced = NULL;
+static HWND g_hBtnAdvEnc = NULL;
+static HWND g_hBtnAdvQ = NULL;
+static HWND g_hEditCrf = NULL;
+static HWND g_hBtnAdvOk = NULL;
+static HWND g_hBtnAdvCancel = NULL;
+static HWND g_hBtnSubtitleTrack = NULL;
 static HWND g_hBtnStart = NULL;
 static HWND g_hBtnECancel = NULL;
 static HWND g_hBtnShow = NULL;
@@ -168,6 +186,29 @@ static long long g_encode_size = 0;
 static int g_input_active = 0;
 static wchar_t g_audio_items[ENC_ACODEC_COUNT][48];
 static wchar_t g_bitrate_items[4][48];
+static wchar_t g_track_items[PROBE_MAX_AUDIO_TRACKS + 2][160];
+static wchar_t g_video_items[PROBE_MAX_VIDEO_TRACKS][128];
+static int g_video_item_map[PROBE_MAX_VIDEO_TRACKS];
+static wchar_t g_sub_items[PROBE_MAX_SUBTITLE_TRACKS + 2][160];
+static int g_advanced_active = 0;
+static int g_adv_encoder = -1;
+static int g_adv_quality = 0; /* 0 preset, 1..4 level, 5 archive, 6 custom */
+static int g_adv_crf = 19;
+static wchar_t g_adv_enc_items[HW_ENC_COUNT + 1][48];
+static int g_adv_enc_map[HW_ENC_COUNT + 1];
+static int g_adv_enc_count = 0;
+static wchar_t g_adv_q_items[7][64];
+static int g_quality_show_details = 0;
+static int g_quality_deep = 0;
+static int g_custom_est_testing = 0;
+static int g_custom_est_ready = 0;
+static int g_custom_est_gen = 0;
+static volatile int g_custom_est_cancel = 0;
+static EstimateLevel g_custom_est;
+static EstimateProgress g_custom_est_progress;
+static RECT g_rc_q_details;
+static RECT g_rc_q_custom;
+static RECT g_rc_q_deep;
 
 typedef struct {
     ProbeError error;
@@ -197,6 +238,17 @@ typedef struct {
 
 typedef struct {
     int gen;
+    EstimateProgress progress;
+} CustomEstProgressMsg;
+
+typedef struct {
+    int gen;
+    EstimateResult result;
+    EstimateLevel est;
+} CustomEstDoneMsg;
+
+typedef struct {
+    int gen;
     EncodeResult result;
     wchar_t path[UTIL_PATH_MAX];
     long long size;
@@ -212,6 +264,7 @@ static void hw_ui_start(HWND hWnd, int auto_test, const wchar_t *pending_path);
 static void hw_ui_update_depth_label(void);
 static void hw_ui_open_depth_dropdown(void);
 static void quality_ui_start(HWND hWnd, int force);
+static void quality_ui_start_deep(HWND hWnd);
 static void quality_ui_update_selection(void);
 static void quality_ui_reset(void);
 static int quality_current_profile(void);
@@ -234,6 +287,18 @@ static void encode_ui_close_custom(void);
 static void encode_ui_accept_custom(HWND hWnd);
 static void encode_ui_open_audio_dropdown(HWND hWnd);
 static void encode_ui_open_bitrate_dropdown(HWND hWnd);
+static void encode_ui_open_audio_track_dropdown(HWND hWnd);
+static void encode_ui_open_video_track_dropdown(HWND hWnd);
+static void encode_ui_update_track_labels(void);
+static void encode_ui_open_advanced(HWND hWnd);
+static void encode_ui_close_advanced(void);
+static void encode_ui_accept_advanced(HWND hWnd);
+static void encode_ui_start_custom_test(HWND hWnd);
+static void encode_ui_restart_custom_test(HWND hWnd);
+static void encode_ui_open_subtitle_track_dropdown(HWND hWnd);
+static void encode_ui_update_adv_labels(void);
+static void encode_ui_refresh_subtitle_button(void);
+static void encode_ui_on_custom_est_done(HWND hWnd, CustomEstDoneMsg *msg);
 static void encode_ui_on_done(HWND hWnd, EncodeDoneMsg *msg);
 static const wchar_t *encode_error_text(EncodeError err);
 static const wchar_t *encode_video_encoder_name(void);
@@ -436,6 +501,130 @@ static const wchar_t *audio_codec_label(const wchar_t *c)
     return c;
 }
 
+static void format_track_channels(int channels, const wchar_t *layout,
+                                  wchar_t *out, size_t cap)
+{
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (layout && *layout && _wcsicmp(layout, L"unknown") != 0) {
+        wcsncpy(out, layout, cap - 1);
+        out[cap - 1] = L'\0';
+        return;
+    }
+    if (channels == 1) {
+        wcsncpy(out, text(STR_COMP_TRACK_MONO), cap - 1);
+    } else if (channels == 2) {
+        wcsncpy(out, text(STR_COMP_TRACK_STEREO), cap - 1);
+    } else if (channels > 0) {
+        _snwprintf(out, cap, text(STR_COMP_TRACK_CHANNELS_FMT), channels);
+    }
+    out[cap - 1] = L'\0';
+}
+
+static void format_audio_track_item(int index, wchar_t *out, size_t cap)
+{
+    const AudioTrackInfo *at;
+    wchar_t name[64];
+    wchar_t channels[48];
+    wchar_t rate[32];
+    const wchar_t *source;
+
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (index < 0 || index >= g_info.audio_tracks_stored) return;
+    at = &g_info.audio_tracks[index];
+
+    source = at->title[0] ? at->title : (at->language[0] ? at->language
+                                                        : text(STR_COMP_TRACK_NO_LANG));
+    if (at->title[0] && at->language[0]) {
+        _snwprintf(name, 64, L"%ls - %ls", at->language, at->title);
+    } else {
+        wcsncpy(name, source, 63);
+    }
+    name[63] = L'\0';
+    format_track_channels(at->channels, at->layout, channels, 48);
+    rate[0] = L'\0';
+    if (at->bitrate > 0) {
+        util_format_bitrate(at->bitrate, rate, 32);
+    } else if (at->sample_rate > 0) {
+        _snwprintf(rate, 32, L"%d Hz", at->sample_rate);
+        rate[31] = L'\0';
+    }
+    _snwprintf(out, cap, text(STR_COMP_TRACK_ITEM_FMT),
+               at->has_index ? at->index : (index + 1),
+               name, audio_codec_label(at->codec), channels, rate);
+    out[cap - 1] = L'\0';
+}
+
+static void format_video_track_item(int ordinal, int stored, wchar_t *out, size_t cap)
+{
+    const VideoTrackInfo *vt;
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (stored < 0 || stored >= g_info.video_tracks_stored) return;
+    vt = &g_info.video_tracks[stored];
+    _snwprintf(out, cap, text(STR_COMP_VIDEO_ITEM_FMT),
+               ordinal + 1, video_codec_label(vt->codec), vt->width, vt->height);
+    out[cap - 1] = L'\0';
+}
+
+static const wchar_t *subtitle_codec_label(const wchar_t *c)
+{
+    if (!c || !*c) return text(STR_CODEC_UNKNOWN);
+    if (_wcsicmp(c, L"subrip") == 0 || _wcsicmp(c, L"srt") == 0) return L"SRT";
+    if (_wcsicmp(c, L"ass") == 0 || _wcsicmp(c, L"ssa") == 0) return L"ASS";
+    if (_wcsicmp(c, L"hdmv_pgs_subtitle") == 0 || _wcsicmp(c, L"pgssub") == 0) return L"PGS";
+    if (_wcsicmp(c, L"dvd_subtitle") == 0 || _wcsicmp(c, L"dvdsub") == 0) return L"VobSub";
+    if (_wcsicmp(c, L"mov_text") == 0) return L"MOV text";
+    if (_wcsicmp(c, L"webvtt") == 0) return L"WebVTT";
+    return c;
+}
+
+static void format_subtitle_track_item(int index, wchar_t *out, size_t cap)
+{
+    const SubtitleTrackInfo *st;
+    wchar_t name[96];
+    const wchar_t *source;
+    const wchar_t *kind;
+
+    if (!out || cap == 0) return;
+    out[0] = L'\0';
+    if (index < 0 || index >= g_info.subtitle_tracks_stored) return;
+    st = &g_info.subtitle_tracks[index];
+    source = st->title[0] ? st->title : (st->language[0] ? st->language
+                                                        : text(STR_COMP_TRACK_NO_LANG));
+    if (st->title[0] && st->language[0]) {
+        _snwprintf(name, 96, L"%ls - %ls", st->language, st->title);
+    } else {
+        wcsncpy(name, source, 95);
+    }
+    name[95] = L'\0';
+    if (st->forced) {
+        wcscat(name, L" (");
+        wcscat(name, text(STR_COMP_TRACK_FORCED));
+        wcscat(name, L")");
+    }
+    kind = encode_subtitle_is_text(st->codec) ? text(STR_COMP_TRACK_TEXT)
+                                              : text(STR_COMP_TRACK_BITMAP);
+    _snwprintf(out, cap, text(STR_COMP_SUB_ITEM_FMT),
+               st->has_index ? st->index : (index + 1),
+               name, subtitle_codec_label(st->codec), kind);
+    out[cap - 1] = L'\0';
+}
+
+static const wchar_t *adv_quality_label(void)
+{
+    switch (g_adv_quality) {
+        case 1: return presets_level_name(QUALITY_TINY);
+        case 2: return presets_level_name(QUALITY_SMALL);
+        case 3: return presets_level_name(QUALITY_BALANCED);
+        case 4: return presets_level_name(QUALITY_HIGH);
+        case 5: return text(STR_COMP_ADV_Q_ARCHIVE);
+        case 6: return text(STR_COMP_ADV_Q_CUSTOM);
+        default: return text(STR_COMP_ADV_Q_PRESET);
+    }
+}
+
 static const wchar_t *container_label(const SourceInfo *s)
 {
     const wchar_t *dot;
@@ -520,19 +709,6 @@ static void format_color_value(const SourceInfo *s, wchar_t *out, size_t cap)
                    m ? m : text(STR_VALUE_UNKNOWN));
     }
     out[cap - 1] = L'\0';
-}
-
-static int quality_has_savings(void)
-{
-    int i;
-    if (!g_quality_has_result || g_info.file_size <= 0) return 0;
-    for (i = 0; i < g_est.level_count; i++) {
-        EstimateLevel *e = &g_est.levels[i];
-        if (e->available && e->est_size_bytes < (double)g_info.file_size * 0.80) {
-            return 1;
-        }
-    }
-    return 0;
 }
 
 static int is_efficient(const SourceInfo *s)
@@ -1020,6 +1196,15 @@ static void draw_hw_test(HDC hdc)
             DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 }
 
+static void draw_chip(HDC hdc, const RECT *rc, const wchar_t *label)
+{
+    RECT r = *rc;
+    gb_fill_round(hdc, &r, GB_LIGHTEST, GB_LIGHTEST);
+    gb_frame_round(hdc, &r, GB_DARKEST, S(2), GB_LIGHTEST, GB_LIGHTEST, 0);
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, label,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
 static void draw_quality(HDC hdc)
 {
     wchar_t buf[512];
@@ -1076,7 +1261,12 @@ static void draw_quality(HDC hdc)
 
         if (g_quality_has_result) e = quality_level_result(level);
         if (e && e->available) {
-            util_format_bytes((long long)e->est_size_bytes, size_mid, 64);
+            double card_video = e->video_size_bytes > 0.0
+                ? e->video_size_bytes : e->est_size_bytes;
+            double src_video = (g_info.video_bitrate > 0 ? (double)g_info.video_bitrate
+                                                         : (double)g_info.format_bitrate) *
+                               g_info.duration / 8.0;
+            util_format_bytes((long long)card_video, size_mid, 64);
             util_format_duration(e->est_seconds, time_mid, 64);
             {
                 RECT sr = { r.left + S(8), r.top + S(54), r.right - S(8), r.top + S(76) };
@@ -1092,9 +1282,9 @@ static void draw_quality(HDC hdc)
                 gb_text(hdc, g_fontSmall, ink, &trr, buf,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
-            if (g_info.file_size > 0 && e->est_size_bytes > 0.0) {
-                int save = (int)((1.0 - e->est_size_bytes / (double)g_info.file_size) * 100.0);
-                if (e->est_size_bytes > (double)g_info.file_size) {
+            if (src_video > 0.0 && card_video > 0.0) {
+                int save = (int)((1.0 - card_video / src_video) * 100.0);
+                if (card_video > src_video) {
                     wcsncpy(buf, text(STR_QUALITY_LARGER), 511);
                 } else if (save < 5) {
                     wcsncpy(buf, text(STR_QUALITY_SAME_SIZE), 511);
@@ -1124,54 +1314,98 @@ static void draw_quality(HDC hdc)
         }
     }
 
-    /* Selected summary and notes. */
+    /* Selected summary, preset details and notes. */
     {
         EstimateLevel *sel = quality_level_result(g_quality_selected);
         int enc = g_quality_has_result ? g_est.encoder
                                        : estimate_choose_encoder(&g_info, &g_hw_info);
-        RECT sr = { S(32), S(288), S(614), S(306) };
-        if (sel && sel->available) {
-            wchar_t left[128], right[128];
-            util_format_bytes((long long)sel->est_size_min, size_lo, 64);
-            util_format_bytes((long long)sel->est_size_max, size_hi, 64);
-            util_format_duration(sel->est_seconds_min, time_lo, 64);
-            util_format_duration(sel->est_seconds_max, time_hi, 64);
-            _snwprintf(buf, 512, L"%ls  ", presets_level_name(g_quality_selected));
+        double src_video_bps = g_info.video_bitrate > 0
+            ? (double)g_info.video_bitrate : (double)g_info.format_bitrate;
+        double src_video_bytes = src_video_bps * g_info.duration / 8.0;
+
+        SetRect(&g_rc_q_custom, S(500), S(286), S(614), S(306));
+        SetRect(&g_rc_q_details, S(500), S(306), S(614), S(326));
+        SetRect(&g_rc_q_deep, S(32), S(354), S(190), S(376));
+
+        if (g_quality_show_details) {
+            RECT sr = { S(32), S(288), S(614), S(302) };
+            _snwprintf(buf, 512, L"%ls  /  %ls", text(STR_QUALITY_DETAILS),
+                       hw_encoder_name(enc));
             buf[511] = L'\0';
-            _snwprintf(left, 128, text(STR_QUALITY_RANGE_FMT), size_lo, size_hi);
-            left[127] = L'\0';
-            _snwprintf(right, 128, text(STR_QUALITY_RANGE_FMT), time_lo, time_hi);
-            right[127] = L'\0';
-            _snwprintf(buf, 512, L"%ls  %ls  /  about %ls",
-                       presets_level_name(g_quality_selected), left, right);
-            buf[511] = L'\0';
-        } else {
-            wcsncpy(buf, text(STR_QUALITY_NO_ESTIMATE), 511);
-            buf[511] = L'\0';
-        }
-        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, buf,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-        _snwprintf(buf, 512, text(STR_QUALITY_ENCODER_FMT), hw_encoder_name(enc));
-        buf[511] = L'\0';
-        SetRect(&sr, S(32), S(306), S(614), S(322));
-        gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-        SetRect(&sr, S(32), S(322), S(614), S(348));
-        gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_COMPAT),
-                DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
-
-        SetRect(&sr, S(32), S(348), S(614), S(362));
-        gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_AUDIO_NOTE),
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-        SetRect(&sr, S(32), S(362), S(614), S(376));
-        if (g_est.used_fallback) {
-            gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, text(STR_QUALITY_FALLBACK),
+            gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, buf,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            for (i = 0; i < 4; i++) {
+                SetRect(&sr, S(32), S(300 + i * 13), S(614), S(312 + i * 13));
+                _snwprintf(buf, 512, text(STR_QUALITY_DETAIL_LINE_FMT),
+                           presets_level_name(i),
+                           presets_quality_value(HW_ENC_X265, i, PRESETS_VIDEO_HEVC),
+                           presets_quality_value(HW_ENC_QSV, i, PRESETS_VIDEO_HEVC),
+                           presets_quality_value(HW_ENC_NVENC, i, PRESETS_VIDEO_HEVC),
+                           presets_quality_value(HW_ENC_AMF, i, PRESETS_VIDEO_HEVC));
+                buf[511] = L'\0';
+                gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
+            draw_chip(hdc, &g_rc_q_deep, text(STR_QUALITY_DEEP));
+            SetRect(&sr, S(198), S(354), S(492), S(376));
+            gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_DEEP_NOTE),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-        } else if (!quality_has_savings()) {
-            gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, text(STR_QUALITY_EFFICIENT),
+            draw_chip(hdc, &g_rc_q_details, text(STR_QUALITY_SUMMARY));
+        } else {
+            RECT sr = { S(32), S(288), S(490), S(306) };
+            if (sel && sel->available) {
+                wchar_t left[128], right[128];
+                double ratio = (sel->est_size_bytes > 0.0 && sel->video_size_bytes > 0.0)
+                    ? sel->video_size_bytes / sel->est_size_bytes : 1.0;
+                util_format_bytes((long long)(sel->est_size_min * ratio), size_lo, 64);
+                util_format_bytes((long long)(sel->est_size_max * ratio), size_hi, 64);
+                util_format_duration(sel->est_seconds_min, time_lo, 64);
+                util_format_duration(sel->est_seconds_max, time_hi, 64);
+                _snwprintf(left, 128, text(STR_QUALITY_RANGE_FMT), size_lo, size_hi);
+                left[127] = L'\0';
+                _snwprintf(right, 128, text(STR_QUALITY_RANGE_FMT), time_lo, time_hi);
+                right[127] = L'\0';
+                _snwprintf(buf, 512, L"%ls  %ls  /  about %ls",
+                           presets_level_name(g_quality_selected), left, right);
+                buf[511] = L'\0';
+            } else {
+                wcsncpy(buf, text(STR_QUALITY_NO_ESTIMATE), 511);
+                buf[511] = L'\0';
+            }
+            gb_text(hdc, g_fontSmallBold, GB_DARKEST, &sr, buf,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            draw_chip(hdc, &g_rc_q_custom, text(STR_QUALITY_CUSTOM));
+
+            SetRect(&sr, S(32), S(306), S(490), S(322));
+            _snwprintf(buf, 512, text(STR_QUALITY_ENCODER_FMT), hw_encoder_name(enc));
+            if (g_est.used_fallback) {
+                wcscat(buf, L"  ");
+                wcscat(buf, text(STR_QUALITY_FALLBACK));
+            }
+            buf[511] = L'\0';
+            gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            draw_chip(hdc, &g_rc_q_details, text(STR_QUALITY_DETAILS));
+
+            SetRect(&sr, S(32), S(322), S(614), S(340));
+            if (sel && sel->available && sel->video_bps > 0.0 && src_video_bps > 0.0) {
+                wchar_t ssrc[64], sdst[64], brs[64], brd[64];
+                util_format_bytes((long long)src_video_bytes, ssrc, 64);
+                util_format_bytes((long long)sel->video_size_bytes, sdst, 64);
+                util_format_bitrate((long long)src_video_bps, brs, 64);
+                util_format_bitrate((long long)sel->video_bps, brd, 64);
+                _snwprintf(buf, 512, text(STR_COMP_VIDEO_BREAKDOWN_FMT),
+                           ssrc, video_codec_label(g_info.video_codec), brs,
+                           sdst, text(STR_CODEC_HEVC), brd);
+                buf[511] = L'\0';
+                gb_text(hdc, g_fontSmall, GB_DARKEST, &sr, buf,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            }
+            SetRect(&sr, S(32), S(342), S(614), S(358));
+            gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_COMPAT),
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            SetRect(&sr, S(32), S(360), S(614), S(376));
+            gb_text(hdc, g_fontSmall, GB_DARK, &sr, text(STR_QUALITY_AUDIO_NOTE),
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
     }
@@ -1397,6 +1631,9 @@ static const wchar_t *encode_video_encoder_name(void)
 {
     int enc;
     if (g_enc_opt.video_codec == ENC_VCODEC_H264) return text(STR_ENC_X264);
+    if (g_enc_opt.encoder_override >= 0) {
+        return hw_encoder_name(g_enc_opt.encoder_override);
+    }
     enc = g_quality_has_result ? g_est.encoder
                                : estimate_choose_encoder(&g_info, &g_hw_info);
     return hw_encoder_name(enc);
@@ -1408,6 +1645,7 @@ static const wchar_t *encode_error_text(EncodeError err)
         case ENCODE_ERR_TOOL:    return text(STR_COMP_ERR_TOOL);
         case ENCODE_ERR_CODEC:   return text(STR_COMP_ERR_CODEC);
         case ENCODE_ERR_AUDIO:   return text(STR_COMP_ERR_AUDIO);
+        case ENCODE_ERR_AUDIO_LAYOUT: return text(STR_COMP_ERR_AUDIO_LAYOUT);
         case ENCODE_ERR_SUBS:    return text(STR_COMP_ERR_SUBS);
         case ENCODE_ERR_PATH:    return text(STR_COMP_ERR_PATH);
         case ENCODE_ERR_FOLDER:  return text(STR_COMP_ERR_FOLDER);
@@ -1442,7 +1680,8 @@ static void update_audio_dropdown_items(void)
     for (codec = 0; codec < ENC_ACODEC_COUNT; codec++) {
         if (!encode_audio_available(g_enc_opt.container, codec)) continue;
         if (codec == ENC_ACODEC_COPY &&
-            !encode_audio_copy_available(&g_info, g_enc_opt.container)) continue;
+            !encode_audio_copy_available_sel(&g_info, &g_enc_opt,
+                                             g_enc_opt.container)) continue;
         wcsncpy(g_audio_items[i], encode_audio_codec_label(codec), 47);
         g_audio_items[i][47] = L'\0';
         i++;
@@ -1475,46 +1714,143 @@ static void update_bitrate_dropdown_items(void)
     }
 }
 
+static double selected_video_source_bps(void)
+{
+    int vt = encode_selected_video_track(&g_info, &g_enc_opt);
+    long long bps = 0;
+    if (g_info.video_tracks_stored > 0 && vt >= 0 &&
+        vt < g_info.video_tracks_stored) {
+        bps = g_info.video_tracks[vt].bitrate;
+    }
+    if (bps <= 0) bps = g_info.video_bitrate;
+    if (bps <= 0) bps = g_info.format_bitrate;
+    return (double)bps;
+}
+
+static double compress_video_bytes(void)
+{
+    EstimateLevel *sel;
+    if (g_custom_est_ready) return g_custom_est.video_size_bytes;
+    sel = quality_level_result(g_quality_selected);
+    return (sel && sel->available) ? sel->video_size_bytes : 0.0;
+}
+
+static double compress_video_seconds(void)
+{
+    EstimateLevel *sel;
+    if (g_custom_est_ready) return g_custom_est.est_seconds;
+    sel = quality_level_result(g_quality_selected);
+    return (sel && sel->available) ? sel->est_seconds : 0.0;
+}
+
+static double compress_audio_bytes(void)
+{
+    long long bps = encode_estimated_audio_bitrate(&g_info, &g_enc_opt);
+    if (bps <= 0 || g_info.duration <= 0.0) return 0.0;
+    return (double)bps * g_info.duration / 8.0 * 1.01;
+}
+
+static void encode_ui_refresh_status_estimate(void)
+{
+    wchar_t size[64], time[64], buf[256];
+    double video = compress_video_bytes();
+    double audio = compress_audio_bytes();
+    double seconds = compress_video_seconds();
+
+    if (g_encode_state != 0) return;
+    if (g_custom_est_testing) {
+        _snwprintf(buf, 256, text(STR_COMP_ADV_TESTING_FMT),
+                   g_custom_est_progress.clip_total > 0
+                       ? g_custom_est_progress.clip_index * 100 /
+                         g_custom_est_progress.clip_total : 0);
+        buf[255] = L'\0';
+        set_status_text(buf, 0);
+        return;
+    }
+    if (video <= 0.0) {
+        set_status_id(STR_COMP_HEADING, 0);
+        return;
+    }
+    util_format_bytes((long long)(video + audio), size, 64);
+    util_format_duration(seconds, time, 64);
+    _snwprintf(buf, 256, text(STR_COMP_TOTAL_FMT), size, time);
+    buf[255] = L'\0';
+    set_status_text(buf, 0);
+}
+
 static void draw_compress_settings(HDC hdc)
 {
     wchar_t buf[1024];
     wchar_t tmp[512];
     wchar_t path[UTIL_PATH_MAX];
-    wchar_t size[64], time[64];
+    wchar_t src_size[64], dst_size[64], src_br[64], dst_br[64];
+    wchar_t audio_src[64], audio_dst[64], audio_desc[96];
     RECT r;
-    EstimateLevel *sel = quality_level_result(g_quality_selected);
-    int has_audio = g_info.audio_track_count > 0;
+    int has_audio = g_info.audio_track_count > 0 && !g_enc_opt.audio_none;
     int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
     int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
-    int i, copies = 0, encoded;
+    int selected_audio = encode_selected_audio_count(&g_info, &g_enc_opt);
+    int total_audio = g_info.audio_track_count;
+    double video_bytes = compress_video_bytes();
+    double src_video_bps = selected_video_source_bps();
+    double dst_video_bps = (video_bytes > 0.0 && g_info.duration > 0.0)
+        ? video_bytes * 8.0 / g_info.duration : 0.0;
     const wchar_t *path_note = text(STR_COMP_OUTPUT_UNKNOWN);
 
     SetRect(&r, S(32), S(108), S(614), S(128));
     gb_text(hdc, g_fontBold, GB_DARKEST, &r, text(STR_COMP_HEADING),
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    _snwprintf(buf, 1024, text(STR_COMP_QUALITY_FMT),
-               presets_level_name(g_quality_selected),
-               encode_video_encoder_name());
-    buf[1023] = L'\0';
-    SetRect(&r, S(32), S(126), S(360), S(142));
-    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-    if (sel && sel->available) {
-        util_format_bytes((long long)sel->est_size_bytes, size, 64);
-        util_format_duration(sel->est_seconds, time, 64);
-        _snwprintf(buf, 1024,
-                   text(g_enc_opt.video_codec == ENC_VCODEC_H264
-                        ? STR_COMP_ESTIMATE_H264_FMT : STR_COMP_ESTIMATE_FMT),
-                   size, time);
+    if (g_enc_opt.crf_override > 0) {
+        if (g_enc_opt.encoder_override == HW_ENC_X265 &&
+            g_enc_opt.crf_override == 19) {
+            wcsncpy(buf, text(STR_COMP_ADV_Q_ARCHIVE), 1023);
+        } else {
+            _snwprintf(buf, 1024, text(STR_COMP_CUSTOM_CRF_FMT),
+                       g_enc_opt.crf_override, encode_video_encoder_name());
+        }
     } else {
-        wcsncpy(buf, text(STR_QUALITY_NO_ESTIMATE), 1023);
+        _snwprintf(buf, 1024, text(STR_COMP_QUALITY_FMT),
+                   presets_level_name(g_quality_selected),
+                   encode_video_encoder_name());
     }
     buf[1023] = L'\0';
-    SetRect(&r, S(360), S(126), S(614), S(142));
+    SetRect(&r, S(360), S(108), S(614), S(128));
     gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
             DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    if (g_custom_est_testing) {
+        _snwprintf(buf, 1024, text(STR_COMP_ADV_TESTING_FMT),
+                   g_custom_est_progress.clip_total > 0
+                       ? g_custom_est_progress.clip_index * 100 /
+                         g_custom_est_progress.clip_total : 0);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(126), S(614), S(142));
+        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    } else if (video_bytes > 0.0) {
+        util_format_bytes((long long)(src_video_bps * g_info.duration / 8.0),
+                          src_size, 64);
+        util_format_bytes((long long)video_bytes, dst_size, 64);
+        util_format_bitrate((long long)src_video_bps, src_br, 64);
+        util_format_bitrate((long long)dst_video_bps, dst_br, 64);
+        _snwprintf(buf, 1024, text(STR_COMP_VIDEO_BREAKDOWN_FMT),
+                   src_size, video_codec_label(g_info.video_codec), src_br,
+                   dst_size,
+                   text(g_enc_opt.video_codec == ENC_VCODEC_H264
+                        ? STR_CODEC_H264 : STR_CODEC_HEVC),
+                   dst_br);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(126), S(614), S(142));
+        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else {
+        wcsncpy(buf, text(STR_QUALITY_NO_ESTIMATE), 1023);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(126), S(614), S(142));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
 
     SetRect(&r, S(32), S(150), S(104), S(178));
     gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_FORMAT_LABEL),
@@ -1530,7 +1866,10 @@ static void draw_compress_settings(HDC hdc)
 
     if (!has_audio) {
         SetRect(&r, S(110), S(226), S(614), S(254));
-        gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_AUDIO_NONE),
+        gb_text(hdc, g_fontSmall, GB_DARK, &r,
+                g_info.audio_track_count > 0
+                    ? text(STR_COMP_AUDIO_NONE_SELECTED)
+                    : text(STR_COMP_AUDIO_NONE),
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     } else if (!has_bitrate) {
         SetRect(&r, S(292), S(226), S(614), S(254));
@@ -1557,24 +1896,26 @@ static void draw_compress_settings(HDC hdc)
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
     }
 
-    /* Audio summary. */
+    /* Audio summary: selected source size -> estimated output. */
     if (has_audio) {
+        long long src_bps = encode_selected_audio_bitrate(&g_info, &g_enc_opt);
+        long long dst_bps = encode_estimated_audio_bitrate(&g_info, &g_enc_opt);
+        util_format_bytes((long long)((double)src_bps * g_info.duration / 8.0),
+                          audio_src, 64);
+        util_format_bytes((long long)((double)dst_bps * g_info.duration / 8.0 * 1.01),
+                          audio_dst, 64);
         if (g_enc_opt.audio_codec == ENC_ACODEC_COPY) {
-            _snwprintf(buf, 1024, text(STR_COMP_AUDIO_COPY_SUMMARY_FMT),
-                       g_info.audio_track_count);
+            wcsncpy(audio_desc, text(STR_COMP_AUDIO_COPY_LABEL), 95);
         } else if (g_enc_opt.audio_codec == ENC_ACODEC_FLAC) {
-            _snwprintf(buf, 1024, text(STR_COMP_AUDIO_FLAC_SUMMARY_FMT),
-                       g_info.audio_track_count);
+            wcsncpy(audio_desc, text(STR_CODEC_FLAC), 95);
         } else {
-            for (i = 0; i < g_info.audio_tracks_stored; i++) {
-                if (encode_audio_track_copies(&g_info, &g_enc_opt, i)) copies++;
-            }
-            encoded = g_info.audio_track_count - copies;
-            if (encoded < 0) encoded = 0;
-            _snwprintf(buf, 1024, text(STR_COMP_AUDIO_SUMMARY_FMT),
-                       g_info.audio_track_count, copies, encoded,
+            _snwprintf(audio_desc, 96, L"%ls %d kbps",
+                       encode_audio_codec_label(g_enc_opt.audio_codec),
                        encode_bitrate_kbps(&g_enc_opt));
         }
+        audio_desc[95] = L'\0';
+        _snwprintf(buf, 1024, text(STR_COMP_AUDIO_BREAKDOWN_FMT),
+                   audio_src, audio_dst, audio_desc);
         buf[1023] = L'\0';
         SetRect(&r, S(32), S(299), S(614), S(315));
         gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
@@ -1582,48 +1923,78 @@ static void draw_compress_settings(HDC hdc)
     }
 
     /* Subtitle summary. */
-    if (g_info.subtitle_track_count <= 0) {
-        wcsncpy(buf, text(STR_COMP_SUBS_NONE), 1023);
-    } else if (g_enc_opt.container == ENC_CONT_MKV) {
-        _snwprintf(buf, 1024, text(STR_COMP_SUBS_COPY_FMT),
-                   g_info.subtitle_track_count);
-    } else {
-        int text_subs = encode_text_subtitle_count(&g_info);
-        int bitmap_subs = encode_bitmap_subtitle_count(&g_info);
-        buf[0] = L'\0';
-        if (text_subs > 0) {
-            _snwprintf(tmp, 512, text(STR_COMP_SUBS_CONVERT_FMT), text_subs);
-            tmp[511] = L'\0';
-            wcscat(buf, tmp);
-        }
-        if (bitmap_subs > 0) {
-            _snwprintf(tmp, 512, text(STR_COMP_SUBS_DROP_FMT), bitmap_subs);
-            tmp[511] = L'\0';
-            if (buf[0]) wcscat(buf, L" ");
-            wcscat(buf, tmp);
-        }
-    }
-    buf[1023] = L'\0';
-    SetRect(&r, S(32), S(317), S(614), S(333));
-    gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    {
+        int selected_subs = encode_selected_subtitle_count(&g_info, &g_enc_opt,
+                                                           g_enc_opt.container);
+        int show_button = g_info.subtitle_track_count > 0;
+        SetRect(&r, S(32), S(314), S(104), S(338));
+        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_SUBS_LABEL),
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-    /* Context note: HDR conversion, downmix, or the persistent Opus note. */
+        if (g_info.subtitle_track_count <= 0) {
+            wcsncpy(buf, text(STR_COMP_SUBS_NONE), 1023);
+        } else if (g_enc_opt.subtitles_none || selected_subs <= 0) {
+            wcsncpy(buf, text(STR_COMP_TRACK_NO_SUBS), 1023);
+        } else if (g_enc_opt.container == ENC_CONT_MKV) {
+            _snwprintf(buf, 1024, text(STR_COMP_SUBS_SELECTED_FMT),
+                       selected_subs, g_info.subtitle_track_count);
+        } else {
+            int text_subs = encode_selected_text_subtitle_count(&g_info, &g_enc_opt);
+            int bitmap_subs = encode_selected_bitmap_subtitle_count(&g_info, &g_enc_opt);
+            buf[0] = L'\0';
+            if (text_subs > 0) {
+                _snwprintf(tmp, 512, text(STR_COMP_SUBS_CONVERT_FMT), text_subs);
+                tmp[511] = L'\0';
+                wcscat(buf, tmp);
+            }
+            if (bitmap_subs > 0) {
+                _snwprintf(tmp, 512, text(STR_COMP_SUBS_DROP_FMT), bitmap_subs);
+                tmp[511] = L'\0';
+                if (buf[0]) wcscat(buf, L" ");
+                wcscat(buf, tmp);
+            }
+        }
+        buf[1023] = L'\0';
+        SetRect(&r, S(show_button ? 340 : 110), S(314), S(614), S(338));
+        gb_text(hdc, g_fontSmall, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+
+    /* Context note: HDR conversion, track selection, downmix, or multi-video. */
     if (g_info.is_hdr && g_enc_opt.video_codec == ENC_VCODEC_H264) {
         wcsncpy(buf, text(STR_COMP_HDR_TONEMAP), 1023);
         buf[1023] = L'\0';
-        SetRect(&r, S(32), S(336), S(614), S(352));
+        SetRect(&r, S(32), S(340), S(614), S(354));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else if (g_enc_opt.audio_none) {
+        wcsncpy(buf, text(STR_COMP_AUDIO_NONE_SELECTED), 1023);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(340), S(614), S(354));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else if (selected_audio < total_audio) {
+        wcsncpy(buf, text(STR_COMP_TRACK_SELECTED_NOTE), 1023);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(340), S(614), S(354));
         gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     } else if (downmix_visible) {
         wcsncpy(buf, text(STR_COMP_DOWNMIX_NOTE), 1023);
         buf[1023] = L'\0';
-        SetRect(&r, S(32), S(336), S(614), S(352));
+        SetRect(&r, S(32), S(340), S(614), S(354));
+        gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    } else if (g_info.video_real_count > 1) {
+        _snwprintf(buf, 1024, text(STR_COMP_MULTI_VIDEO_NOTE),
+                   g_info.video_real_count);
+        buf[1023] = L'\0';
+        SetRect(&r, S(32), S(340), S(614), S(354));
         gb_text(hdc, g_fontSmall, GB_DARK, &r, buf,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
-    SetRect(&r, S(32), S(354), S(614), S(372));
+    SetRect(&r, S(32), S(356), S(614), S(374));
     gb_text(hdc, g_fontSmall, GB_DARK, &r,
             g_enc_opt.container == ENC_CONT_MKV
                 ? text(STR_COMP_OPUS_NOTE)
@@ -1774,6 +2145,45 @@ static void draw_custom_input(HDC hdc)
     gb_frame(hdc, &r, GB_DARKEST, S(2));
 }
 
+static void draw_advanced_settings(HDC hdc)
+{
+    wchar_t buf[512];
+    RECT r;
+    int percent = 0;
+
+    SetRect(&r, S(32), S(108), S(614), S(130));
+    gb_text(hdc, g_fontBold, GB_DARKEST, &r, text(STR_COMP_ADV_HEADING),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(146), S(196), S(176));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_ADV_ENCODER),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(186), S(196), S(216));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_ADV_QUALITY),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(226), S(196), S(256));
+    gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, text(STR_COMP_ADV_CRF),
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SetRect(&r, S(32), S(262), S(614), S(300));
+    gb_text(hdc, g_fontSmall, GB_DARK, &r, text(STR_COMP_ADV_NOTE),
+            DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+    if (g_custom_est_testing) {
+        if (g_custom_est_progress.clip_total > 0) {
+            percent = g_custom_est_progress.clip_index * 100 /
+                      g_custom_est_progress.clip_total;
+        }
+        _snwprintf(buf, 512, text(STR_COMP_ADV_TESTING_FMT), percent);
+        buf[511] = L'\0';
+        SetRect(&r, S(32), S(300), S(614), S(318));
+        gb_text(hdc, g_fontSmallBold, GB_DARKEST, &r, buf,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+}
+
 static void paint_main(HWND hWnd, HDC hdc)
 {
     RECT rc;
@@ -1804,7 +2214,10 @@ static void paint_main(HWND hWnd, HDC hdc)
     }
 
     draw_steps(hdc, cw);
-    if (g_input_active) {
+    if (g_advanced_active) {
+        draw_panel(hdc, &g_rc_panel, text(STR_COMP_ADV_TITLE));
+        draw_advanced_settings(hdc);
+    } else if (g_input_active) {
         draw_panel(hdc, &g_rc_panel, text(STR_COMP_CUSTOM_TITLE));
         draw_custom_input(hdc);
     } else if (g_hw_testing) {
@@ -1874,7 +2287,17 @@ static void layout_controls(void)
     SetWindowPos(g_hBtnVcH264, NULL, S(266), S(184), S(150), S(28), SWP_NOZORDER);
     SetWindowPos(g_hBtnAudio, NULL, S(110), S(222), S(170), S(30), SWP_NOZORDER);
     SetWindowPos(g_hBtnABitrate, NULL, S(292), S(222), S(170), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAudioTrack, NULL, S(468), S(222), S(146), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnVideoTrack, NULL, S(422), S(184), S(192), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnSubtitleTrack, NULL, S(110), S(314), S(220), S(24), SWP_NOZORDER);
     SetWindowPos(g_hBtnDownmix, NULL, S(110), S(258), S(220), S(26), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAdvanced, NULL, cw - S(32) - S(180) - S(8) - S(140),
+                 S(388), S(140), btn_h, SWP_NOZORDER);
+    SetWindowPos(g_hBtnAdvEnc, NULL, S(200), S(144), S(300), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAdvQ, NULL, S(200), S(184), S(300), S(30), SWP_NOZORDER);
+    SetWindowPos(g_hEditCrf, NULL, S(200), S(224), S(120), S(28), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAdvOk, NULL, S(200), S(320), S(180), S(34), SWP_NOZORDER);
+    SetWindowPos(g_hBtnAdvCancel, NULL, S(388), S(320), S(120), S(34), SWP_NOZORDER);
     SetWindowPos(g_hBtnStart, NULL, cw - S(32) - S(180), S(388), S(180), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnECancel, NULL, cw - S(32) - S(170), S(388), S(170), btn_h, SWP_NOZORDER);
     SetWindowPos(g_hBtnShow, NULL, cw - S(32) - S(180), S(388), S(180), btn_h, SWP_NOZORDER);
@@ -1904,6 +2327,15 @@ static void hide_encode_controls(void)
     ShowWindow(g_hBtnAudio, SW_HIDE);
     ShowWindow(g_hBtnABitrate, SW_HIDE);
     ShowWindow(g_hBtnDownmix, SW_HIDE);
+    ShowWindow(g_hBtnAudioTrack, SW_HIDE);
+    ShowWindow(g_hBtnVideoTrack, SW_HIDE);
+    ShowWindow(g_hBtnSubtitleTrack, SW_HIDE);
+    ShowWindow(g_hBtnAdvanced, SW_HIDE);
+    ShowWindow(g_hBtnAdvEnc, SW_HIDE);
+    ShowWindow(g_hBtnAdvQ, SW_HIDE);
+    ShowWindow(g_hEditCrf, SW_HIDE);
+    ShowWindow(g_hBtnAdvOk, SW_HIDE);
+    ShowWindow(g_hBtnAdvCancel, SW_HIDE);
     ShowWindow(g_hBtnStart, SW_HIDE);
     ShowWindow(g_hBtnECancel, SW_HIDE);
     ShowWindow(g_hBtnShow, SW_HIDE);
@@ -1916,6 +2348,33 @@ static void update_controls_visibility(void)
 {
     if (!g_hWnd) return;
     hide_encode_controls();
+
+    if (g_advanced_active) {
+        ShowWindow(g_hBtnChoose, SW_HIDE);
+        ShowWindow(g_hBtnContinue, SW_HIDE);
+        ShowWindow(g_hBtnDetails, SW_HIDE);
+        ShowWindow(g_hBtnRetest, SW_HIDE);
+        ShowWindow(g_hBtnDepth, SW_HIDE);
+        ShowWindow(g_hBtnSkip, SW_HIDE);
+        ShowWindow(g_hBtnBack, SW_HIDE);
+        ShowWindow(g_hBtnTestAgain, SW_HIDE);
+        ShowWindow(g_hBtnQCancel, SW_HIDE);
+        ShowWindow(g_hBtnCompress, SW_HIDE);
+        ShowWindow(g_hBtnPreview, SW_HIDE);
+        ShowWindow(g_hBtnStart, SW_HIDE);
+        ShowWindow(g_hBtnECancel, SW_HIDE);
+        ShowWindow(g_hBtnShow, SW_HIDE);
+        ShowWindow(g_hBtnAdvEnc, SW_SHOW);
+        ShowWindow(g_hBtnAdvQ, SW_SHOW);
+        ShowWindow(g_hBtnAdvOk, SW_SHOW);
+        ShowWindow(g_hBtnAdvCancel, SW_SHOW);
+        if (g_adv_quality == 5 || g_adv_quality == 6) {
+            ShowWindow(g_hEditCrf, SW_SHOW);
+            EnableWindow(g_hEditCrf, g_adv_quality == 6 ? TRUE : FALSE);
+        }
+        encode_ui_update_adv_labels();
+        return;
+    }
 
     if (g_input_active) {
         ShowWindow(g_hBtnChoose, SW_HIDE);
@@ -2342,6 +2801,7 @@ static void quality_ui_open_preview(HWND hWnd)
         return;
     }
     g_quality_preview = 1;
+    g_quality_show_details = 0;
     quality_load_preview();
     update_controls_visibility();
     InvalidateRect(hWnd, NULL, FALSE);
@@ -2395,7 +2855,8 @@ static DWORD WINAPI quality_thread_proc(LPVOID param)
     }
     msg->gen = job->gen;
     result = estimate_run(&g_info, &g_hw_info, quality_current_profile(),
-                          &msg->est, quality_progress_cb, job, &g_est_cancel);
+                          g_quality_deep, &msg->est,
+                          quality_progress_cb, job, &g_est_cancel);
     msg->result = result;
     if (!PostMessageW(job->hwnd, WM_APP_EST_DONE, 0, (LPARAM)msg)) free(msg);
     free(job);
@@ -2413,6 +2874,13 @@ static void quality_ui_start(HWND hWnd, int force)
     g_step = 1;
     g_quality_testing = 1;
     g_quality_has_result = 0;
+    g_quality_show_details = 0;
+    g_custom_est_ready = 0;
+    if (g_custom_est_testing) {
+        g_custom_est_cancel = 1;
+        g_custom_est_gen++;
+        g_custom_est_testing = 0;
+    }
     g_quality_gen++;
     quality_cleanup_previews();
     g_est_cancel = 0;
@@ -2423,6 +2891,9 @@ static void quality_ui_start(HWND hWnd, int force)
     g_est_seconds = (g_quality_last_seconds > 0.0)
         ? (int)(g_quality_last_seconds + 0.5)
         : estimate_demo_seconds(&g_info, &g_hw_info, quality_current_profile());
+    if (g_quality_deep) {
+        g_est_seconds = g_est_seconds * 2 + 3;
+    }
     set_status_id(STR_STATUS_QUALITY_TESTING, 0);
     update_controls_visibility();
     InvalidateRect(hWnd, NULL, FALSE);
@@ -2445,6 +2916,13 @@ static void quality_ui_start(HWND hWnd, int force)
         set_status_text(text(STR_QUALITY_ERROR), 1);
         update_controls_visibility();
     }
+}
+
+static void quality_ui_start_deep(HWND hWnd)
+{
+    if (!g_has_info || g_quality_testing) return;
+    g_quality_deep = 1;
+    quality_ui_start(hWnd, 1);
 }
 
 static void quality_ui_on_done(HWND hWnd, EstimateDoneMsg *msg)
@@ -2491,6 +2969,7 @@ static void quality_ui_test_again(HWND hWnd)
     note[511] = L'\0';
     if (gb_message_box(hWnd, text(STR_QUALITY_RETEST_TITLE), note,
                        MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        g_quality_deep = 0;
         quality_ui_start(hWnd, 1);
     }
 }
@@ -2530,15 +3009,39 @@ static void quality_select_at(HWND hWnd, int x, int y)
     pt.x = x;
     pt.y = y;
     if (g_quality_testing || !g_quality_has_result) return;
+    if (!g_quality_preview) {
+        if (g_quality_show_details) {
+            if (PtInRect(&g_rc_q_deep, pt)) {
+                quality_ui_start_deep(hWnd);
+                return;
+            }
+            if (PtInRect(&g_rc_q_details, pt)) {
+                g_quality_show_details = 0;
+                InvalidateRect(hWnd, NULL, FALSE);
+                return;
+            }
+        } else {
+            if (PtInRect(&g_rc_q_custom, pt)) {
+                encode_ui_open_advanced(hWnd);
+                return;
+            }
+            if (PtInRect(&g_rc_q_details, pt)) {
+                g_quality_show_details = 1;
+                InvalidateRect(hWnd, NULL, FALSE);
+                return;
+            }
+        }
+    }
     if (g_quality_preview) {
         for (i = 0; i < g_preview_chip_count; i++) {
             if (PtInRect(&g_rc_preview_chips[i], pt)) {
                 int level = g_est.levels_used[i];
-                if (level != g_quality_selected) {
-                    g_quality_selected = level;
-                    quality_load_preview();
-                    InvalidateRect(hWnd, NULL, FALSE);
-                }
+                g_quality_selected = level;
+                g_enc_opt.crf_override = 0;
+                g_enc_opt.encoder_override = -1;
+                g_custom_est_ready = 0;
+                quality_load_preview();
+                InvalidateRect(hWnd, NULL, FALSE);
                 return;
             }
         }
@@ -2547,10 +3050,11 @@ static void quality_select_at(HWND hWnd, int x, int y)
     for (i = 0; i < g_card_count; i++) {
         if (PtInRect(&g_rc_cards[i], pt)) {
             int level = g_est.levels_used[i];
-            if (level != g_quality_selected) {
-                g_quality_selected = level;
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
+            g_quality_selected = level;
+            g_enc_opt.crf_override = 0;
+            g_enc_opt.encoder_override = -1;
+            g_custom_est_ready = 0;
+            InvalidateRect(hWnd, NULL, FALSE);
             return;
         }
     }
@@ -2581,13 +3085,22 @@ static void encode_ui_reset(void)
     g_encode_error_code = ENCODE_ERR_NONE;
     g_encode_size = 0;
     g_input_active = 0;
+    g_advanced_active = 0;
+    g_quality_show_details = 0;
+    g_quality_deep = 0;
+    g_custom_est_gen++;
+    g_custom_est_cancel = 1;
+    g_custom_est_testing = 0;
+    g_custom_est_ready = 0;
+    memset(&g_custom_est, 0, sizeof(g_custom_est));
+    memset(&g_custom_est_progress, 0, sizeof(g_custom_est_progress));
     memset(&g_enc_opt, 0, sizeof(g_enc_opt));
     memset(&g_encode_progress, 0, sizeof(g_encode_progress));
 }
 
 static void encode_ui_update_controls(void)
 {
-    int has_audio = g_info.audio_track_count > 0;
+    int has_audio = g_info.audio_track_count > 0 && !g_enc_opt.audio_none;
     int has_bitrate = has_audio && encode_audio_has_bitrate(g_enc_opt.audio_codec);
     int downmix_visible = has_bitrate && encode_any_downmix(&g_info, &g_enc_opt);
     wchar_t buf[128];
@@ -2605,6 +3118,9 @@ static void encode_ui_update_controls(void)
 
     ShowWindow(g_hBtnBack, g_encode_state == 1 ? SW_HIDE : SW_SHOW);
     ShowWindow(g_hBtnStart, (g_encode_state == 0 || g_encode_state == 3) ? SW_SHOW : SW_HIDE);
+    if (g_encode_state == 0 || g_encode_state == 3) {
+        EnableWindow(g_hBtnStart, g_custom_est_testing ? FALSE : TRUE);
+    }
     ShowWindow(g_hBtnECancel, g_encode_state == 1 ? SW_SHOW : SW_HIDE);
     ShowWindow(g_hBtnShow, g_encode_state == 2 ? SW_SHOW : SW_HIDE);
 
@@ -2622,6 +3138,18 @@ static void encode_ui_update_controls(void)
             ShowWindow(g_hBtnAudio, SW_SHOW);
             SetWindowTextW(g_hBtnAudio, encode_audio_codec_label(g_enc_opt.audio_codec));
         }
+        if (g_info.audio_tracks_stored > 1) {
+            ShowWindow(g_hBtnAudioTrack, SW_SHOW);
+        }
+        if (g_info.video_real_count > 1) {
+            ShowWindow(g_hBtnVideoTrack, SW_SHOW);
+        }
+        if (g_info.subtitle_track_count > 0) {
+            ShowWindow(g_hBtnSubtitleTrack, SW_SHOW);
+            encode_ui_refresh_subtitle_button();
+        }
+        ShowWindow(g_hBtnAdvanced, SW_SHOW);
+        encode_ui_update_track_labels();
         if (has_bitrate) {
             ShowWindow(g_hBtnABitrate, SW_SHOW);
             bitrate_button_text(buf, 128);
@@ -2633,6 +3161,7 @@ static void encode_ui_update_controls(void)
             }
         }
     }
+    if (g_encode_state == 0) encode_ui_refresh_status_estimate();
 }
 
 static void encode_ui_enter(HWND hWnd)
@@ -2643,11 +3172,18 @@ static void encode_ui_enter(HWND hWnd)
         encode_options_defaults(&g_enc_opt, &g_info);
         g_enc_options_ready = 1;
     }
+    if (g_info.video_tracks_stored > 0 &&
+        (g_enc_opt.video_track < 0 ||
+         g_enc_opt.video_track >= g_info.video_tracks_stored)) {
+        g_enc_opt.video_track = (g_info.video_primary >= 0)
+            ? g_info.video_primary : 0;
+    }
     if (g_info.audio_track_count <= 0) {
         g_enc_opt.audio_codec = ENC_ACODEC_COPY;
     } else if (!encode_audio_available(g_enc_opt.container, g_enc_opt.audio_codec) ||
                (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
-                !encode_audio_copy_available(&g_info, g_enc_opt.container))) {
+                !encode_audio_copy_available_sel(&g_info, &g_enc_opt,
+                                                 g_enc_opt.container))) {
         g_enc_opt.audio_codec = encode_default_audio(g_enc_opt.container);
     }
     encode_fix_bitrate(&g_enc_opt);
@@ -2673,7 +3209,8 @@ static void encode_ui_audio_picked(int index, void *user)
     for (codec = 0; codec < ENC_ACODEC_COUNT; codec++) {
         if (!encode_audio_available(g_enc_opt.container, codec)) continue;
         if (codec == ENC_ACODEC_COPY &&
-            !encode_audio_copy_available(&g_info, g_enc_opt.container)) continue;
+            !encode_audio_copy_available_sel(&g_info, &g_enc_opt,
+                                             g_enc_opt.container)) continue;
         if (i == index) {
             g_enc_opt.audio_codec = codec;
             encode_fix_bitrate(&g_enc_opt);
@@ -2715,6 +3252,9 @@ static void encode_ui_open_audio_dropdown(HWND hWnd)
     update_audio_dropdown_items();
     for (codec = 0; codec < ENC_ACODEC_COUNT; codec++) {
         if (!encode_audio_available(g_enc_opt.container, codec)) continue;
+        if (codec == ENC_ACODEC_COPY &&
+            !encode_audio_copy_available_sel(&g_info, &g_enc_opt,
+                                             g_enc_opt.container)) continue;
         ptrs[count] = g_audio_items[count];
         if (codec == g_enc_opt.audio_codec) selected = count;
         count++;
@@ -2723,6 +3263,531 @@ static void encode_ui_open_audio_dropdown(HWND hWnd)
     MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
     gb_dropdown_open(hWnd, &anchor, ptrs, count, selected,
                      encode_ui_audio_picked, NULL);
+}
+
+static void encode_ui_update_track_labels(void)
+{
+    wchar_t buf[96];
+
+    if (g_info.audio_tracks_stored > 1) {
+        int selected = encode_selected_audio_count(&g_info, &g_enc_opt);
+        buf[0] = L'\0';
+        if (g_enc_opt.audio_none) {
+            wcsncpy(buf, text(STR_COMP_AUDIO_TRACK_NONE_FMT), 95);
+        } else if (g_enc_opt.audio_mask == 0 ||
+            selected >= g_info.audio_tracks_stored) {
+            _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_ALL_FMT),
+                       g_info.audio_tracks_stored);
+        } else if (selected == 1) {
+            int i, found = 0;
+            for (i = 0; i < g_info.audio_tracks_stored; i++) {
+                if (encode_audio_selected(&g_info, &g_enc_opt, i)) { found = i; break; }
+            }
+            _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_ONE_FMT),
+                       found + 1, g_info.audio_tracks_stored);
+        } else {
+            _snwprintf(buf, 96, text(STR_COMP_AUDIO_TRACK_N_FMT), selected);
+        }
+        buf[95] = L'\0';
+        SetWindowTextW(g_hBtnAudioTrack, buf);
+    }
+
+    if (g_info.video_real_count > 1) {
+        int i, ordinal = 0, count = 0;
+        int target = encode_selected_video_track(&g_info, &g_enc_opt);
+        for (i = 0; i < g_info.video_tracks_stored; i++) {
+            if (g_info.video_tracks[i].attached_pic) continue;
+            if (i == target) ordinal = count;
+            count++;
+        }
+        _snwprintf(buf, 96, text(STR_COMP_VIDEO_TRACK_FMT), ordinal + 1, count);
+        buf[95] = L'\0';
+        SetWindowTextW(g_hBtnVideoTrack, buf);
+    }
+}
+
+static void encode_ui_audio_track_picked(int index, void *user)
+{
+    (void)user;
+    if (index <= 0) {
+        g_enc_opt.audio_mask = 0; /* all tracks */
+        g_enc_opt.audio_none = 0;
+    } else if (index == 1) {
+        g_enc_opt.audio_mask = 0;
+        g_enc_opt.audio_none = 1;
+    } else {
+        int track = index - 2;
+        g_enc_opt.audio_none = 0;
+        if (track >= 0 && track < g_info.audio_tracks_stored &&
+            track < 32) {
+            g_enc_opt.audio_mask = 1u << track;
+        }
+    }
+    if (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
+        !encode_audio_copy_available_sel(&g_info, &g_enc_opt,
+                                         g_enc_opt.container)) {
+        g_enc_opt.audio_codec = encode_default_audio(g_enc_opt.container);
+    }
+    encode_fix_bitrate(&g_enc_opt);
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void encode_ui_video_track_picked(int index, void *user)
+{
+    (void)user;
+    if (index >= 0 && index < PROBE_MAX_VIDEO_TRACKS) {
+        int stored = g_video_item_map[index];
+        if (stored >= 0 && stored < g_info.video_tracks_stored) {
+            g_enc_opt.video_track = stored;
+        }
+    }
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+    encode_ui_restart_custom_test(g_hWnd);
+}
+
+static void encode_ui_open_audio_track_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[PROBE_MAX_AUDIO_TRACKS + 2];
+    RECT anchor;
+    int count = 0, selected = 0, i;
+
+    _snwprintf(g_track_items[0], 160, text(STR_COMP_TRACK_ALL_FMT),
+               g_info.audio_tracks_stored);
+    g_track_items[0][159] = L'\0';
+    ptrs[count++] = g_track_items[0];
+    wcsncpy(g_track_items[1], text(STR_COMP_TRACK_NO_AUDIO), 159);
+    g_track_items[1][159] = L'\0';
+    ptrs[count++] = g_track_items[1];
+    for (i = 0; i < g_info.audio_tracks_stored &&
+                count < PROBE_MAX_AUDIO_TRACKS + 2; i++) {
+        format_audio_track_item(i, g_track_items[count], 160);
+        if (g_enc_opt.audio_mask == (1u << i)) selected = count;
+        ptrs[count] = g_track_items[count];
+        count++;
+    }
+    if (g_enc_opt.audio_none) selected = 1;
+
+    GetWindowRect(g_hBtnAudioTrack, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, count, selected,
+                     encode_ui_audio_track_picked, NULL);
+}
+
+static void encode_ui_open_video_track_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[PROBE_MAX_VIDEO_TRACKS];
+    RECT anchor;
+    int count = 0, selected = 0, i;
+    int target = encode_selected_video_track(&g_info, &g_enc_opt);
+
+    for (i = 0; i < g_info.video_tracks_stored && count < PROBE_MAX_VIDEO_TRACKS; i++) {
+        if (g_info.video_tracks[i].attached_pic) continue;
+        g_video_item_map[count] = i;
+        format_video_track_item(count, i, g_video_items[count], 128);
+        if (i == target) selected = count;
+        ptrs[count] = g_video_items[count];
+        count++;
+    }
+
+    GetWindowRect(g_hBtnVideoTrack, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, count, selected,
+                     encode_ui_video_track_picked, NULL);
+}
+
+static void encode_ui_subtitle_track_picked(int index, void *user)
+{
+    (void)user;
+    if (index == 0) {
+        g_enc_opt.subtitle_mask = 0;
+        g_enc_opt.subtitles_none = 0;
+    } else if (index == 1) {
+        g_enc_opt.subtitle_mask = 0;
+        g_enc_opt.subtitles_none = 1;
+    } else {
+        int track = index - 2;
+        g_enc_opt.subtitles_none = 0;
+        if (track >= 0 && track < g_info.subtitle_tracks_stored && track < 32) {
+            g_enc_opt.subtitle_mask = 1u << track;
+        }
+    }
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void encode_ui_open_subtitle_track_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[PROBE_MAX_SUBTITLE_TRACKS + 2];
+    RECT anchor;
+    int count = 0, selected = 0, i;
+
+    _snwprintf(g_sub_items[0], 160, text(STR_COMP_TRACK_ALL_SUBS_FMT),
+               g_info.subtitle_tracks_stored);
+    g_sub_items[0][159] = L'\0';
+    ptrs[count++] = g_sub_items[0];
+    wcsncpy(g_sub_items[1], text(STR_COMP_TRACK_NO_SUBS), 159);
+    g_sub_items[1][159] = L'\0';
+    ptrs[count++] = g_sub_items[1];
+
+    for (i = 0; i < g_info.subtitle_tracks_stored && count < PROBE_MAX_SUBTITLE_TRACKS + 2; i++) {
+        format_subtitle_track_item(i, g_sub_items[count], 160);
+        if (g_enc_opt.subtitle_mask == (1u << i)) selected = count;
+        ptrs[count] = g_sub_items[count];
+        count++;
+    }
+    if (g_enc_opt.subtitles_none) selected = 1;
+
+    GetWindowRect(g_hBtnSubtitleTrack, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, count, selected,
+                     encode_ui_subtitle_track_picked, NULL);
+}
+
+static void encode_ui_refresh_subtitle_button(void)
+{
+    wchar_t buf[96];
+    int selected;
+
+    if (!g_hBtnSubtitleTrack) return;
+    if (g_info.subtitle_track_count <= 0) {
+        SetWindowTextW(g_hBtnSubtitleTrack, text(STR_COMP_TRACK_NO_SUBS));
+        return;
+    }
+    selected = encode_selected_subtitle_count(&g_info, &g_enc_opt,
+                                              g_enc_opt.container);
+    if (g_enc_opt.subtitles_none) {
+        wcsncpy(buf, text(STR_COMP_SUBTITLE_TRACK_NONE_FMT), 95);
+    } else if (g_enc_opt.subtitle_mask == 0) {
+        _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ALL_FMT),
+                   g_info.subtitle_tracks_stored);
+    } else if (selected == 1) {
+        _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ONE_FMT), selected);
+    } else {
+        _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_N_FMT), selected);
+    }
+    buf[95] = L'\0';
+    SetWindowTextW(g_hBtnSubtitleTrack, buf);
+}
+
+static void encode_ui_update_adv_labels(void)
+{
+    const wchar_t *enc_name = text(STR_COMP_ADV_ENC_AUTO);
+    int i;
+    for (i = 0; i < g_adv_enc_count; i++) {
+        if (g_adv_enc_map[i] == g_adv_encoder) {
+            enc_name = g_adv_enc_items[i];
+            break;
+        }
+    }
+    if (g_hBtnAdvEnc) SetWindowTextW(g_hBtnAdvEnc, enc_name);
+    if (g_hBtnAdvQ) SetWindowTextW(g_hBtnAdvQ, adv_quality_label());
+    if (g_hEditCrf) {
+        wchar_t buf[16];
+        _snwprintf(buf, 16, L"%d", g_adv_crf);
+        buf[15] = L'\0';
+        SetWindowTextW(g_hEditCrf, buf);
+    }
+}
+
+static void encode_ui_adv_encoder_picked(int index, void *user)
+{
+    (void)user;
+    if (index >= 0 && index < g_adv_enc_count) {
+        g_adv_encoder = g_adv_enc_map[index];
+        encode_ui_update_adv_labels();
+        InvalidateRect(g_hWnd, NULL, FALSE);
+    }
+}
+
+static void encode_ui_adv_quality_picked(int index, void *user)
+{
+    (void)user;
+    g_adv_quality = index;
+    if (index == 5) {
+        g_adv_crf = 19;
+        g_adv_encoder = HW_ENC_X265;
+    }
+    encode_ui_update_adv_labels();
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void encode_ui_open_adv_encoder_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[HW_ENC_COUNT + 1];
+    RECT anchor;
+    int i, selected = 0;
+
+    for (i = 0; i < g_adv_enc_count; i++) {
+        ptrs[i] = g_adv_enc_items[i];
+        if (g_adv_enc_map[i] == g_adv_encoder) selected = i;
+    }
+    GetWindowRect(g_hBtnAdvEnc, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, g_adv_enc_count, selected,
+                     encode_ui_adv_encoder_picked, NULL);
+}
+
+static void encode_ui_open_adv_quality_dropdown(HWND hWnd)
+{
+    const wchar_t *ptrs[7];
+    RECT anchor;
+    int i;
+    for (i = 0; i < 7; i++) ptrs[i] = g_adv_q_items[i];
+    GetWindowRect(g_hBtnAdvQ, &anchor);
+    MapWindowPoints(NULL, hWnd, (POINT*)&anchor, 2);
+    gb_dropdown_open(hWnd, &anchor, ptrs, 7, g_adv_quality,
+                     encode_ui_adv_quality_picked, NULL);
+}
+
+static void encode_ui_open_advanced(HWND hWnd)
+{
+    int i;
+
+    if (g_encode_state == 1 || g_advanced_active) return;
+    if (!g_enc_options_ready) {
+        encode_options_defaults(&g_enc_opt, &g_info);
+        g_enc_options_ready = 1;
+    }
+    g_adv_encoder = g_enc_opt.encoder_override;
+    g_adv_quality = 0;
+    g_adv_crf = g_enc_opt.crf_override > 0
+        ? g_enc_opt.crf_override
+        : presets_quality_value(
+            g_adv_encoder >= 0 ? g_adv_encoder
+                               : estimate_choose_encoder(&g_info, &g_hw_info),
+            g_quality_selected, g_enc_opt.video_codec);
+    if (g_enc_opt.crf_override > 0) {
+        g_adv_quality = (g_enc_opt.encoder_override == HW_ENC_X265 &&
+                         g_enc_opt.crf_override == 19) ? 5 : 6;
+    }
+
+    g_adv_enc_count = 0;
+    g_adv_enc_map[g_adv_enc_count] = -1;
+    wcsncpy(g_adv_enc_items[g_adv_enc_count], text(STR_COMP_ADV_ENC_AUTO), 47);
+    g_adv_enc_items[g_adv_enc_count][47] = L'\0';
+    g_adv_enc_count++;
+    for (i = 0; i < HW_ENC_COUNT; i++) {
+        int available = (i == HW_ENC_X265) || g_hw_info.enc_ok8[i] ||
+                        g_hw_info.enc_ok10[i];
+        if (!available) continue;
+        g_adv_enc_map[g_adv_enc_count] = i;
+        wcsncpy(g_adv_enc_items[g_adv_enc_count], hw_encoder_name(i), 47);
+        g_adv_enc_items[g_adv_enc_count][47] = L'\0';
+        g_adv_enc_count++;
+    }
+    if (g_adv_encoder >= 0) {
+        int found = 0;
+        for (i = 0; i < g_adv_enc_count; i++) {
+            if (g_adv_enc_map[i] == g_adv_encoder) { found = 1; break; }
+        }
+        if (!found) g_adv_encoder = -1;
+    }
+
+    _snwprintf(g_adv_q_items[0], 64, L"%ls (%ls)",
+               text(STR_COMP_ADV_Q_PRESET),
+               presets_level_name(g_quality_selected));
+    g_adv_q_items[0][63] = L'\0';
+    wcsncpy(g_adv_q_items[1], presets_level_name(QUALITY_TINY), 63);
+    wcsncpy(g_adv_q_items[2], presets_level_name(QUALITY_SMALL), 63);
+    wcsncpy(g_adv_q_items[3], presets_level_name(QUALITY_BALANCED), 63);
+    wcsncpy(g_adv_q_items[4], presets_level_name(QUALITY_HIGH), 63);
+    wcsncpy(g_adv_q_items[5], text(STR_COMP_ADV_Q_ARCHIVE), 63);
+    wcsncpy(g_adv_q_items[6], text(STR_COMP_ADV_Q_CUSTOM), 63);
+    for (i = 0; i < 7; i++) g_adv_q_items[i][63] = L'\0';
+
+    g_advanced_active = 1;
+    encode_ui_update_adv_labels();
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    SetFocus(g_hBtnAdvOk);
+}
+
+static void encode_ui_close_advanced(void)
+{
+    if (!g_advanced_active) return;
+    g_advanced_active = 0;
+    update_controls_visibility();
+    InvalidateRect(g_hWnd, NULL, FALSE);
+}
+
+static void encode_ui_accept_advanced(HWND hWnd)
+{
+    int was_quality = (g_step == 1);
+
+    if (g_adv_quality == 6) {
+        wchar_t buf[16];
+        wchar_t *end = NULL;
+        long value;
+        GetWindowTextW(g_hEditCrf, buf, 16);
+        buf[15] = L'\0';
+        util_trim(buf);
+        value = wcstol(buf, &end, 10);
+        if (!buf[0] || !end || *end != L'\0' || value < 1 || value > 51) {
+            gb_message_box(hWnd, text(STR_COMP_ADV_TITLE),
+                           text(STR_COMP_ADV_CRF_INVALID),
+                           MB_OK | MB_ICONWARNING);
+            SetFocus(g_hEditCrf);
+            return;
+        }
+        g_adv_crf = (int)value;
+    }
+
+    if (g_adv_quality == 5) {
+        g_enc_opt.encoder_override = HW_ENC_X265;
+        g_enc_opt.crf_override = 19;
+    } else if (g_adv_quality == 6) {
+        g_enc_opt.encoder_override = g_adv_encoder;
+        g_enc_opt.crf_override = g_adv_crf;
+    } else if (g_adv_quality >= 1 && g_adv_quality <= 4) {
+        g_quality_selected = g_adv_quality - 1;
+        g_enc_opt.encoder_override = g_adv_encoder;
+        g_enc_opt.crf_override = 0;
+    } else {
+        g_enc_opt.encoder_override = g_adv_encoder;
+        g_enc_opt.crf_override = 0;
+    }
+
+    g_advanced_active = 0;
+    if (was_quality) encode_ui_enter(hWnd);
+    encode_ui_restart_custom_test(hWnd);
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+}
+
+/* ------------------------------------------------- custom setting test */
+static void custom_est_progress_cb(const EstimateProgress *p, void *user)
+{
+    typedef struct { HWND hwnd; int gen; } Job;
+    Job *job = (Job*)user;
+    CustomEstProgressMsg *msg;
+    if (!p || !job) return;
+    msg = (CustomEstProgressMsg*)malloc(sizeof(CustomEstProgressMsg));
+    if (!msg) return;
+    msg->gen = job->gen;
+    msg->progress = *p;
+    if (!PostMessageW(job->hwnd, WM_APP_CUSTOM_EST_PROGRESS, 0, (LPARAM)msg)) free(msg);
+}
+
+typedef struct {
+    HWND hwnd;
+    int gen;
+    int encoder;
+    int video_codec;
+    int video_track;
+    int quality;
+    int clips;
+    double clip_seconds;
+} CustomEstJob;
+
+static DWORD WINAPI custom_est_thread_proc(LPVOID param)
+{
+    CustomEstJob *job = (CustomEstJob*)param;
+    CustomEstDoneMsg *msg;
+    msg = (CustomEstDoneMsg*)calloc(1, sizeof(CustomEstDoneMsg));
+    if (!msg) { free(job); return 0; }
+    msg->gen = job->gen;
+    msg->result = estimate_run_custom(&g_info, &g_hw_info, job->encoder,
+                                      job->video_codec, job->quality,
+                                      job->video_track, job->clips,
+                                      job->clip_seconds, &msg->est,
+                                      custom_est_progress_cb, job,
+                                      &g_custom_est_cancel);
+    if (!PostMessageW(job->hwnd, WM_APP_CUSTOM_EST_DONE, 0, (LPARAM)msg)) free(msg);
+    free(job);
+    return 0;
+}
+
+static void encode_ui_start_custom_test(HWND hWnd)
+{
+    CustomEstJob *job;
+    HANDLE thread;
+    int encoder, quality;
+    if (!g_has_info || g_custom_est_testing) return;
+    encoder = g_enc_opt.encoder_override >= 0
+        ? g_enc_opt.encoder_override
+        : estimate_choose_encoder(&g_info, &g_hw_info);
+    quality = g_enc_opt.crf_override > 0
+        ? g_enc_opt.crf_override
+        : presets_quality_value(encoder, g_quality_selected,
+                                g_enc_opt.video_codec);
+    if (quality <= 0) quality = 24;
+
+    g_custom_est_testing = 1;
+    g_custom_est_ready = 0;
+    g_custom_est_gen++;
+    g_custom_est_cancel = 0;
+    memset(&g_custom_est, 0, sizeof(g_custom_est));
+    memset(&g_custom_est_progress, 0, sizeof(g_custom_est_progress));
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+
+    job = (CustomEstJob*)calloc(1, sizeof(CustomEstJob));
+    if (!job) {
+        g_custom_est_testing = 0;
+        return;
+    }
+    job->hwnd = hWnd;
+    job->gen = g_custom_est_gen;
+    job->encoder = encoder;
+    job->video_codec = g_enc_opt.video_codec;
+    job->video_track = encode_selected_video_track(&g_info, &g_enc_opt);
+    job->quality = quality;
+    job->clips = 4;
+    job->clip_seconds = 4.0;
+    thread = CreateThread(NULL, 0, custom_est_thread_proc, job, 0, NULL);
+    if (thread) CloseHandle(thread);
+    else {
+        free(job);
+        g_custom_est_testing = 0;
+        update_controls_visibility();
+    }
+}
+
+static void encode_ui_restart_custom_test(HWND hWnd)
+{
+    int need = (g_enc_opt.encoder_override >= 0 || g_enc_opt.crf_override > 0 ||
+                g_enc_opt.video_codec == ENC_VCODEC_H264 ||
+                encode_selected_video_track(&g_info, &g_enc_opt) != g_info.video_primary);
+    if (!need) {
+        g_custom_est_ready = 0;
+        g_custom_est_testing = 0;
+        if (hWnd) {
+            update_controls_visibility();
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        return;
+    }
+    if (g_custom_est_testing) {
+        g_custom_est_cancel = 1;
+        g_custom_est_gen++;
+        g_custom_est_testing = 0;
+    }
+    encode_ui_start_custom_test(hWnd);
+}
+
+static void encode_ui_on_custom_est_done(HWND hWnd, CustomEstDoneMsg *msg){
+    if (!msg) return;
+    if (msg->gen != g_custom_est_gen) { free(msg); return; }
+    if (msg->result == ESTIMATE_OK) {
+        g_custom_est = msg->est;
+        g_custom_est_ready = 1;
+        set_status_id(STR_COMP_ADV_TEST_READY, 0);
+    } else if (msg->result == ESTIMATE_CANCELLED) {
+        g_custom_est_ready = 0;
+    } else {
+        g_custom_est_ready = 0;
+        set_status_text(text(STR_COMP_ADV_TEST_FAILED), 1);
+        gb_message_box(hWnd, text(STR_COMP_ADV_TITLE),
+                       text(STR_COMP_ADV_TEST_FAILED), MB_OK | MB_ICONERROR);
+    }
+    g_custom_est_testing = 0;
+    g_custom_est_cancel = 0;
+    update_controls_visibility();
+    InvalidateRect(hWnd, NULL, FALSE);
+    free(msg);
 }
 
 static void encode_ui_open_bitrate_dropdown(HWND hWnd)
@@ -2844,18 +3909,24 @@ static void encode_ui_start(HWND hWnd)
     int encoder;
 
     if (!g_has_info || g_encode_state == 1) return;
+    if (g_custom_est_testing) {
+        set_status_text(text(STR_COMP_ADV_WAIT), 1);
+        return;
+    }
     encode_fix_bitrate(&g_enc_opt);
 
-    if (!encode_audio_available(g_enc_opt.container, g_enc_opt.audio_codec) ||
-        (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
-         !encode_audio_copy_available(&g_info, g_enc_opt.container))) {
+    if (!g_enc_opt.audio_none &&
+        (!encode_audio_available(g_enc_opt.container, g_enc_opt.audio_codec) ||
+         (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
+          !encode_audio_copy_available_sel(&g_info, &g_enc_opt,
+                                           g_enc_opt.container)))) {
         gb_message_box(hWnd, text(STR_COMP_PANEL), text(STR_COMP_ERR_AUDIO),
                        MB_OK | MB_ICONERROR);
         return;
     }
 
     if (g_enc_opt.container == ENC_CONT_MP4) {
-        int bitmap = encode_bitmap_subtitle_count(&g_info);
+        int bitmap = encode_selected_bitmap_subtitle_count(&g_info, &g_enc_opt);
         if (bitmap > 0) {
             _snwprintf(msg_text, 512, text(STR_COMP_SUBS_DROP_CONFIRM), bitmap);
             msg_text[511] = L'\0';
@@ -2927,6 +3998,12 @@ static void encode_ui_cancel(void)
 static void encode_ui_back(HWND hWnd)
 {
     if (g_encode_state == 1) return;
+    if (g_custom_est_testing) {
+        g_custom_est_cancel = 1;
+        g_custom_est_gen++;
+        g_custom_est_testing = 0;
+        g_custom_est_ready = 0;
+    }
     if (g_encode_state == 2) {
         g_step = 1;
         g_encode_state = 0;
@@ -3089,6 +4166,35 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_hBtnDownmix = CreateWindowExW(0, L"BUTTON", text(STR_COMP_DOWNMIX),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 220, 26, hWnd, (HMENU)IDC_BTN_DOWNMIX, inst, NULL);
+            g_hBtnVideoTrack = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 192, 28, hWnd, (HMENU)IDC_BTN_VIDEO_TRACK, inst, NULL);
+            g_hBtnAudioTrack = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 146, 30, hWnd, (HMENU)IDC_BTN_AUDIO_TRACK, inst, NULL);
+            g_hBtnSubtitleTrack = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 220, 24, hWnd, (HMENU)IDC_BTN_SUBTITLE_TRACK, inst, NULL);
+            g_hBtnAdvanced = CreateWindowExW(0, L"BUTTON", text(STR_COMP_ADV_TITLE),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 140, 38, hWnd, (HMENU)IDC_BTN_ADVANCED, inst, NULL);
+            g_hBtnAdvEnc = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 300, 30, hWnd, (HMENU)IDC_BTN_ADV_ENC, inst, NULL);
+            g_hBtnAdvQ = CreateWindowExW(0, L"BUTTON", L"",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 300, 30, hWnd, (HMENU)IDC_BTN_ADV_Q, inst, NULL);
+            g_hEditCrf = CreateWindowExW(0, L"EDIT", L"19",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                0, 0, 120, 28, hWnd, (HMENU)IDC_EDIT_CRF, inst, NULL);
+            SendMessageW(g_hEditCrf, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            SendMessageW(g_hEditCrf, EM_SETLIMITTEXT, 2, 0);
+            g_hBtnAdvOk = CreateWindowExW(0, L"BUTTON", text(STR_COMP_ADV_APPLY),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 180, 34, hWnd, (HMENU)IDC_BTN_ADV_OK, inst, NULL);
+            g_hBtnAdvCancel = CreateWindowExW(0, L"BUTTON", text(STR_COMP_CANCEL),
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                0, 0, 120, 34, hWnd, (HMENU)IDC_BTN_ADV_CANCEL, inst, NULL);
             g_hBtnStart = CreateWindowExW(0, L"BUTTON", text(STR_COMP_START),
                 WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 0, 0, 180, 38, hWnd, (HMENU)IDC_BTN_START, inst, NULL);
@@ -3137,6 +4243,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             track_button(g_hBtnAudio);
             track_button(g_hBtnABitrate);
             track_button(g_hBtnDownmix);
+            track_button(g_hBtnVideoTrack);
+            track_button(g_hBtnAudioTrack);
+            track_button(g_hBtnSubtitleTrack);
+            track_button(g_hBtnAdvanced);
+            track_button(g_hBtnAdvEnc);
+            track_button(g_hBtnAdvQ);
+            track_button(g_hBtnAdvOk);
+            track_button(g_hBtnAdvCancel);
             track_button(g_hBtnStart);
             track_button(g_hBtnECancel);
             track_button(g_hBtnShow);
@@ -3292,6 +4406,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDC_BTN_TESTAGAIN:
                 case IDC_BTN_PREVIEW:
                 case IDC_BTN_INPUT_CANCEL:
+                case IDC_BTN_ADVANCED:
+                case IDC_BTN_ADV_CANCEL:
                     role = GB_ROLE_PUSH;
                     break;
                 case IDC_BTN_CONTINUE:
@@ -3299,6 +4415,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDC_BTN_START:
                 case IDC_BTN_SHOW:
                 case IDC_BTN_INPUT_OK:
+                case IDC_BTN_ADV_OK:
                     role = GB_ROLE_PRIMARY;
                     break;
                 case IDC_BTN_QCANCEL:
@@ -3308,6 +4425,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 case IDC_BTN_DEPTH:
                 case IDC_BTN_AUDIO:
                 case IDC_BTN_ABITRATE:
+                case IDC_BTN_VIDEO_TRACK:
+                case IDC_BTN_AUDIO_TRACK:
+                case IDC_BTN_SUBTITLE_TRACK:
+                case IDC_BTN_ADV_ENC:
+                case IDC_BTN_ADV_Q:
                     role = GB_ROLE_DROP;
                     break;
                 case IDC_BTN_CONT_MKV:
@@ -3358,6 +4480,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     dis->CtlID == IDC_BTN_VC_H264 ||
                     dis->CtlID == IDC_BTN_AUDIO ||
                     dis->CtlID == IDC_BTN_ABITRATE ||
+                    dis->CtlID == IDC_BTN_VIDEO_TRACK ||
+                    dis->CtlID == IDC_BTN_AUDIO_TRACK ||
+                    dis->CtlID == IDC_BTN_SUBTITLE_TRACK ||
+                    dis->CtlID == IDC_BTN_ADVANCED ||
+                    dis->CtlID == IDC_BTN_ADV_ENC ||
+                    dis->CtlID == IDC_BTN_ADV_Q ||
+                    dis->CtlID == IDC_BTN_ADV_CANCEL ||
                     dis->CtlID == IDC_BTN_DOWNMIX ||
                     dis->CtlID == IDC_BTN_ECANCEL ||
                     dis->CtlID == IDC_BTN_INPUT_CANCEL) {
@@ -3366,7 +4495,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (dis->CtlID == IDC_BTN_COMPRESS ||
                     dis->CtlID == IDC_BTN_START ||
                     dis->CtlID == IDC_BTN_SHOW ||
-                    dis->CtlID == IDC_BTN_INPUT_OK) {
+                    dis->CtlID == IDC_BTN_INPUT_OK ||
+                    dis->CtlID == IDC_BTN_ADV_OK) {
                     font = g_fontBold;
                 }
                 gb_draw_control(dis, font, role, checked, tracked_hover(dis->hwndItem));
@@ -3392,6 +4522,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                             update_controls_visibility();
                             InvalidateRect(hWnd, NULL, FALSE);
                         } else {
+                            g_quality_deep = 0;
                             quality_ui_start(hWnd, 0);
                         }
                     }
@@ -3423,8 +4554,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     } else if (!encode_audio_available(new_container,
                                                       g_enc_opt.audio_codec) ||
                                (g_enc_opt.audio_codec == ENC_ACODEC_COPY &&
-                                !encode_audio_copy_available(&g_info,
-                                                             new_container))) {
+                                !encode_audio_copy_available_sel(&g_info,
+                                                                 &g_enc_opt,
+                                                                 new_container))) {
                         g_enc_opt.audio_codec = encode_default_audio(new_container);
                     }
                     encode_fix_bitrate(&g_enc_opt);
@@ -3439,12 +4571,46 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                         ? ENC_VCODEC_H264 : ENC_VCODEC_HEVC;
                     update_controls_visibility();
                     InvalidateRect(hWnd, NULL, FALSE);
+                    encode_ui_restart_custom_test(hWnd);
                     return 0;
                 case IDC_BTN_AUDIO:
                     if (g_encode_state == 0 && g_step == 2 &&
                         g_info.audio_track_count > 0) {
                         encode_ui_open_audio_dropdown(hWnd);
                     }
+                    return 0;
+                case IDC_BTN_AUDIO_TRACK:
+                    if (g_encode_state == 0 && g_step == 2 &&
+                        g_info.audio_tracks_stored > 1) {
+                        encode_ui_open_audio_track_dropdown(hWnd);
+                    }
+                    return 0;
+                case IDC_BTN_VIDEO_TRACK:
+                    if (g_encode_state == 0 && g_step == 2 &&
+                        g_info.video_real_count > 1) {
+                        encode_ui_open_video_track_dropdown(hWnd);
+                    }
+                    return 0;
+                case IDC_BTN_SUBTITLE_TRACK:
+                    if (g_encode_state == 0 && g_step == 2 &&
+                        g_info.subtitle_track_count > 0) {
+                        encode_ui_open_subtitle_track_dropdown(hWnd);
+                    }
+                    return 0;
+                case IDC_BTN_ADVANCED:
+                    if (g_encode_state == 0) encode_ui_open_advanced(hWnd);
+                    return 0;
+                case IDC_BTN_ADV_ENC:
+                    if (g_advanced_active) encode_ui_open_adv_encoder_dropdown(hWnd);
+                    return 0;
+                case IDC_BTN_ADV_Q:
+                    if (g_advanced_active) encode_ui_open_adv_quality_dropdown(hWnd);
+                    return 0;
+                case IDC_BTN_ADV_OK:
+                    if (g_advanced_active) encode_ui_accept_advanced(hWnd);
+                    return 0;
+                case IDC_BTN_ADV_CANCEL:
+                    if (g_advanced_active) encode_ui_close_advanced();
                     return 0;
                 case IDC_BTN_ABITRATE:
                     if (g_encode_state == 0 && g_step == 2 &&
@@ -3577,6 +4743,24 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_APP_EST_DONE: {
             EstimateDoneMsg *m = (EstimateDoneMsg*)lParam;
             quality_ui_on_done(hWnd, m);
+            return 0;
+        }
+
+        case WM_APP_CUSTOM_EST_PROGRESS: {
+            CustomEstProgressMsg *p = (CustomEstProgressMsg*)lParam;
+            if (p) {
+                if (p->gen == g_custom_est_gen) {
+                    g_custom_est_progress = p->progress;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                free(p);
+            }
+            return 0;
+        }
+
+        case WM_APP_CUSTOM_EST_DONE: {
+            CustomEstDoneMsg *m = (CustomEstDoneMsg*)lParam;
+            encode_ui_on_custom_est_done(hWnd, m);
             return 0;
         }
 

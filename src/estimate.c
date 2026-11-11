@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "estimate.h"
 #include "presets.h"
+#include "encode.h"
 #include "util.h"
 
 #include <windows.h>
@@ -393,7 +394,7 @@ static void sample_positions(double duration, int clips, double clip_sec, double
 }
 
 EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
-                            int profile_override, EstimateSet *out,
+                            int profile_override, int deep, EstimateSet *out,
                             EstimateProgressCallback cb, void *user,
                             volatile int *cancel)
 {
@@ -416,6 +417,11 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
         : (hw ? hw->profile : HW_PROFILE_BALANCED);
     out->profile = profile;
     estimate_plan(src, profile, levels, &level_count, &clips, &clip_sec);
+    if (deep) {
+        clips = 4;
+        clip_sec = 6.0;
+        if (src->duration > 0.0 && clip_sec > src->duration) clip_sec = src->duration;
+    }
     out->level_count = level_count;
     out->clips = clips;
     out->clip_seconds = clip_sec;
@@ -451,8 +457,10 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
         double bytes_sum = 0.0;
         double speeds[4];
         double ssims[4];
+        double clip_bps[4];
         int speed_count = 0;
         int ssim_count = 0;
+        int bps_count = 0;
         double videos_sec = 0.0;
         int level_id = levels[li];
         int ok = 1;
@@ -526,6 +534,9 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
             DeleteFileW(sample_path);
             bytes_sum += bytes;
             videos_sec += clip_sec;
+            if (clip_sec > 0.0 && bps_count < 4) {
+                clip_bps[bps_count++] = bytes * 8.0 / clip_sec;
+            }
             {
                 double effective = 0.0;
                 if (wall > startup_wall + 0.02) {
@@ -552,14 +563,30 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
             return ESTIMATE_ERROR;
         }
         {
-            double video_bps = (bytes_sum * 8.0) / videos_sec;
+            double mean_bps = (bytes_sum * 8.0) / videos_sec;
+            double video_bps = mean_bps;
             double audio_bps = 0.0;
             double speed;
             double est_size, est_time;
             EstimateLevel *e = &out->levels[li];
 
+            /* Short samples often miss the most detailed scenes in long,
+               grainy films. Blend the mean with the heaviest sample so the
+               estimate errs on the safe side. */
+            if (bps_count > 1) {
+                double max_bps = clip_bps[0];
+                int bi;
+                for (bi = 1; bi < bps_count; bi++) {
+                    if (clip_bps[bi] > max_bps) max_bps = clip_bps[bi];
+                }
+                if (max_bps > mean_bps * 1.15) {
+                    video_bps = (mean_bps + max_bps) / 2.0;
+                }
+            }
+
             if (src->audio_track_count > 0) {
-                audio_bps = (src->audio_bitrate > 0) ? (double)src->audio_bitrate : 128000.0;
+                long long total = encode_audio_total_bitrate(src);
+                audio_bps = (total > 0) ? (double)total : 128000.0;
             }
             speed = (speed_count > 0) ? robust_speed(speeds, speed_count) : 0.0;
             if (speed <= 0.0 && videos_sec > 0.0) {
@@ -573,13 +600,16 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
             e->level = level_id;
             e->available = 1;
             e->est_size_bytes = est_size;
-            e->est_size_min = est_size * 0.85;
-            e->est_size_max = est_size * 1.15;
+            e->est_size_min = est_size * 0.75;
+            e->est_size_max = est_size * 1.35;
             e->est_seconds = est_time;
             e->est_seconds_min = est_time * 0.70;
             e->est_seconds_max = est_time * 1.30;
             e->sample_video_bps = video_bps;
             e->sample_speed = speed;
+            e->video_bps = video_bps;
+            e->audio_bps = audio_bps;
+            e->video_size_bytes = video_bps * src->duration / 8.0 * 1.01;
             e->ssim = (ssim_count > 0) ? median_value(ssims, ssim_count) : 0.0;
             e->ssim_available = (ssim_count > 0);
             e->clips = clips;
@@ -600,6 +630,148 @@ EstimateResult estimate_run(const SourceInfo *src, const HwInfo *hw,
         } else {
             cleanup_temp_dir(tempdir);
         }
+    }
+    return ESTIMATE_OK;
+}
+
+EstimateResult estimate_run_custom(const SourceInfo *src, const HwInfo *hw,
+                                   int encoder, int video_codec, int quality,
+                                   int video_track,
+                                   int clips, double clip_seconds,
+                                   EstimateLevel *out,
+                                   EstimateProgressCallback cb, void *user,
+                                   volatile int *cancel)
+{
+    wchar_t tempdir[UTIL_PATH_MAX];
+    wchar_t sample_path[UTIL_PATH_MAX];
+    wchar_t cmd[UTIL_PATH_MAX * 2 + 1024];
+    SourceInfo sample_src;
+    double positions[4] = { 0, 0, 0, 0 };
+    double speeds[4];
+    double clip_bps[4];
+    double bytes_sum = 0.0;
+    double videos_sec = 0.0;
+
+    ULONGLONG t0;
+    int speed_count = 0;
+    int bps_count = 0;
+    int i;
+
+    (void)hw;
+    if (!src || !out) return ESTIMATE_ERROR;
+    memset(out, 0, sizeof(*out));
+    sample_src = *src;
+    if (video_track >= 0 && video_track < sample_src.video_tracks_stored) {
+        sample_src.video_primary = video_track;
+    }
+    if (clips < 1) clips = 1;
+    if (clips > 4) clips = 4;
+    if (clip_seconds <= 0.0) clip_seconds = 1.0;
+    if (clip_seconds > src->duration && src->duration > 0.0) {
+        clip_seconds = src->duration;
+    }
+
+    make_temp_dir(tempdir, UTIL_PATH_MAX);
+    sample_positions(src->duration, clips, clip_seconds, positions);
+    t0 = GetTickCount64();
+
+    for (i = 0; i < clips; i++) {
+        char *buf = NULL;
+        size_t len = 0;
+        DWORD code = 0;
+        long long size = 0;
+        ULONGLONG c0, c1;
+        double wall, speed;
+        EstimateProgress p;
+        UtilRunResult rr;
+
+        _snwprintf(sample_path, UTIL_PATH_MAX, L"%ls\\custom_%d.mkv", tempdir, i);
+        sample_path[UTIL_PATH_MAX - 1] = L'\0';
+
+        if (!presets_build_sample_cmd_crf(&sample_src, encoder, video_codec,
+                                          quality, positions[i], clip_seconds,
+                                          sample_path, cmd,
+                                          sizeof(cmd) / sizeof(wchar_t))) {
+            cleanup_temp_dir(tempdir);
+            return ESTIMATE_ERROR;
+        }
+        DeleteFileW(sample_path);
+        c0 = GetTickCount64();
+        rr = util_run_capture(cmd, 180000, cancel, &buf, &len, &code);
+        c1 = GetTickCount64();
+        free(buf);
+        if (rr == UTIL_RUN_CANCELLED) {
+            DeleteFileW(sample_path);
+            cleanup_temp_dir(tempdir);
+            return ESTIMATE_CANCELLED;
+        }
+        if (rr != UTIL_RUN_OK || code != 0 ||
+            !util_get_file_size(sample_path, &size) || size <= 0) {
+            DeleteFileW(sample_path);
+            cleanup_temp_dir(tempdir);
+            return ESTIMATE_ERROR;
+        }
+        DeleteFileW(sample_path);
+
+        wall = (double)(c1 - c0) / 1000.0;
+        if (wall <= 0.0) wall = 0.001;
+
+        speed = clip_seconds / wall;
+        if (speed > 0.0 && speed_count < 4) speeds[speed_count++] = speed;
+        bytes_sum += (double)size;
+        videos_sec += clip_seconds;
+        if (clip_seconds > 0.0 && bps_count < 4) {
+            clip_bps[bps_count++] = (double)size * 8.0 / clip_seconds;
+        }
+
+        memset(&p, 0, sizeof(p));
+        p.level = quality;
+        p.level_index = 0;
+        p.level_total = 1;
+        p.clip_index = i + 1;
+        p.clip_total = clips;
+        p.speed = speed;
+        p.elapsed_seconds = (double)(GetTickCount64() - t0) / 1000.0;
+        if (cb) cb(&p, user);
+    }
+    cleanup_temp_dir(tempdir);
+
+    if (videos_sec <= 0.0) return ESTIMATE_ERROR;
+    {
+        double mean_bps = (bytes_sum * 8.0) / videos_sec;
+        double video_bps = mean_bps;
+        double speed = (speed_count > 0) ? robust_speed(speeds, speed_count) : 0.0;
+        double size, secs;
+
+        if (bps_count > 1) {
+            double max_bps = clip_bps[0];
+            int bi;
+            for (bi = 1; bi < bps_count; bi++) {
+                if (clip_bps[bi] > max_bps) max_bps = clip_bps[bi];
+            }
+            if (max_bps > mean_bps * 1.15) {
+                video_bps = (mean_bps + max_bps) / 2.0;
+            }
+        }
+
+        size = video_bps * src->duration / 8.0 * 1.01;
+        secs = (src->duration > 0.0) ? src->duration / (speed > 0.0 ? speed : 1.0) : 0.0;
+
+        out->level = -1;
+        out->available = 1;
+        out->clips = clips;
+        out->clip_seconds = clip_seconds;
+        out->sample_video_bps = video_bps;
+        out->video_bps = video_bps;
+        out->audio_bps = 0.0;
+        out->video_size_bytes = size;
+        out->est_size_bytes = size;
+        out->est_size_min = size * 0.75;
+        out->est_size_max = size * 1.35;
+        out->sample_speed = speed;
+        out->est_seconds = secs;
+        out->est_seconds_min = secs * 0.70;
+        out->est_seconds_max = secs * 1.30;
     }
     return ESTIMATE_OK;
 }

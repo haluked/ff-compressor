@@ -43,7 +43,7 @@ int wmain(int argc, wchar_t **argv)
     hw.speed8_median[HW_ENC_NVENC] = 10.0;
     hw.hdr_encoder = -1;
 
-    er = estimate_run(&src, &hw, HW_PROFILE_AUTO, &est, progress, NULL, NULL);
+    er = estimate_run(&src, &hw, HW_PROFILE_AUTO, 0, &est, progress, NULL, NULL);
     wprintf(L"result=%d encoder=%ls fallback=%d complete=%d\n",
             (int)er, hw_encoder_name(est.encoder), est.used_fallback, est.complete);
     if (er == ESTIMATE_OK && est.used_fallback && est.encoder == HW_ENC_X265) {

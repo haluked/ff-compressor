@@ -42,6 +42,14 @@ void encode_options_defaults(EncodeOptions *opt, const SourceInfo *src)
     opt->bitrate = ENC_ABITRATE_MUSIC;
     opt->custom_kbps = ENC_BITRATE_HIGH_KBPS;
     opt->downmix_stereo = 1;
+    opt->audio_mask = 0; /* every audio track */
+    opt->audio_none = 0;
+    opt->video_track = (src && src->video_primary >= 0)
+        ? src->video_primary : 0;
+    opt->subtitle_mask = 0; /* every subtitle track */
+    opt->subtitles_none = 0;
+    opt->encoder_override = -1;
+    opt->crf_override = 0;
 }
 
 int encode_audio_available(int container, int codec)
@@ -63,6 +71,77 @@ int encode_audio_available(int container, int codec)
     return 0;
 }
 
+int encode_audio_selected(const SourceInfo *src, const EncodeOptions *opt,
+                          int track_index)
+{
+    if (!src || track_index < 0 || track_index >= src->audio_tracks_stored) return 0;
+    if (opt && opt->audio_none) return 0;
+    if (!opt || opt->audio_mask == 0) return 1;
+    if (track_index >= 32) return 0;
+    return (opt->audio_mask & (1u << track_index)) != 0;
+}
+
+int encode_selected_audio_count(const SourceInfo *src, const EncodeOptions *opt)
+{
+    int i, n = 0;
+    if (!src || src->audio_track_count <= 0) return 0;
+    if (opt && opt->audio_none) return 0;
+    if (!opt || opt->audio_mask == 0) {
+        /* If ffprobe reported more tracks than we could store, the command
+           maps all of them through the 0:a? shorthand. */
+        return (src->audio_track_count > src->audio_tracks_stored)
+            ? src->audio_track_count : src->audio_tracks_stored;
+    }
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        if (encode_audio_selected(src, opt, i)) n++;
+    }
+    return n;
+}
+
+int encode_selected_video_track(const SourceInfo *src, const EncodeOptions *opt)
+{
+    int index;
+    if (!src || src->video_tracks_stored <= 0) return 0;
+    index = opt ? opt->video_track : src->video_primary;
+    if (index < 0 || index >= src->video_tracks_stored) {
+        index = (src->video_primary >= 0 && src->video_primary < src->video_tracks_stored)
+            ? src->video_primary : 0;
+    }
+    return index;
+}
+
+long long encode_audio_total_bitrate(const SourceInfo *src)
+{
+    long long total = 0;
+    int i;
+    if (!src || src->audio_track_count <= 0) return 0;
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        if (src->audio_tracks[i].bitrate > 0) total += src->audio_tracks[i].bitrate;
+        else total += 128000; /* unknown bitrate: use a neutral estimate */
+    }
+    if (total <= 0) {
+        total = (src->audio_bitrate > 0) ? src->audio_bitrate
+                                         : (long long)src->audio_track_count * 128000;
+    }
+    return total;
+}
+
+long long encode_selected_audio_bitrate(const SourceInfo *src,
+                                        const EncodeOptions *opt)
+{
+    long long total = 0;
+    int i;
+    if (!src || src->audio_track_count <= 0) return 0;
+    if (opt && opt->audio_none) return 0;
+    if (!opt || opt->audio_mask == 0) return encode_audio_total_bitrate(src);
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        if (!encode_audio_selected(src, opt, i)) continue;
+        total += (src->audio_tracks[i].bitrate > 0)
+            ? src->audio_tracks[i].bitrate : 128000;
+    }
+    return total;
+}
+
 int encode_audio_copy_available(const SourceInfo *src, int container)
 {
     int i;
@@ -71,7 +150,32 @@ int encode_audio_copy_available(const SourceInfo *src, int container)
     if (src->audio_track_count <= 0) return 1;
     if (src->audio_tracks_stored < src->audio_track_count) return 0;
     for (i = 0; i < src->audio_tracks_stored; i++) {
-        const wchar_t *c = src->audio_tracks[i].codec;
+        const wchar_t *c;
+        /* The UI calls this before an option struct exists. Verify every
+           track in that case; encode_build_command verifies the selection. */
+        c = src->audio_tracks[i].codec;
+        if (_wcsicmp(c, L"aac") != 0 && _wcsicmp(c, L"mp3") != 0 &&
+            _wcsicmp(c, L"ac3") != 0 && _wcsicmp(c, L"eac3") != 0 &&
+            _wcsicmp(c, L"alac") != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int encode_audio_copy_available_sel(const SourceInfo *src,
+                                    const EncodeOptions *opt,
+                                    int container)
+{
+    int i;
+    if (!src || !opt) return 0;
+    if (container != ENC_CONT_MP4) return 1;
+    if (encode_selected_audio_count(src, opt) <= 0) return 1;
+    if (src->audio_tracks_stored < src->audio_track_count && opt->audio_mask == 0) return 0;
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        const wchar_t *c;
+        if (!encode_audio_selected(src, opt, i)) continue;
+        c = src->audio_tracks[i].codec;
         if (_wcsicmp(c, L"aac") != 0 && _wcsicmp(c, L"mp3") != 0 &&
             _wcsicmp(c, L"ac3") != 0 && _wcsicmp(c, L"eac3") != 0 &&
             _wcsicmp(c, L"alac") != 0) {
@@ -159,6 +263,50 @@ static long long track_bitrate(const SourceInfo *src, int index)
     return 0;
 }
 
+static const wchar_t *track_layout(const SourceInfo *src, int index)
+{
+    if (src && index >= 0 && index < src->audio_tracks_stored) {
+        return src->audio_tracks[index].layout;
+    }
+    return L"";
+}
+
+/* Opus only accepts its canonical layouts. Side/wide variants such as
+   5.1(side) or 7.1(wide) make libopus abort the whole encode with -22. */
+static const wchar_t *opus_safe_layout(int channels)
+{
+    switch (channels) {
+        case 1:  return L"mono";
+        case 2:  return L"stereo";
+        case 3:  return L"3.0";
+        case 4:  return L"quad";
+        case 5:  return L"5.0";
+        case 6:  return L"5.1";
+        case 7:  return L"6.1";
+        case 8:  return L"7.1";
+        default: return NULL;
+    }
+}
+
+static int opus_layout_is_safe(const wchar_t *layout)
+{
+    static const wchar_t *safe[] = {
+        L"mono", L"stereo", L"3.0", L"4.0", L"quad",
+        L"5.0", L"5.1", L"6.1", L"7.1", NULL
+    };
+    int i;
+    if (!layout || !*layout) return 0;
+    for (i = 0; safe[i]; i++) {
+        if (_wcsicmp(layout, safe[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static int layout_is_known(const wchar_t *layout)
+{
+    return layout && *layout && _wcsicmp(layout, L"unknown") != 0;
+}
+
 int encode_has_multichannel(const SourceInfo *src)
 {
     int i;
@@ -182,9 +330,15 @@ int encode_audio_downmix_track(const SourceInfo *src, const EncodeOptions *opt,
 int encode_any_downmix(const SourceInfo *src, const EncodeOptions *opt)
 {
     int i;
+    int count;
     if (!src || !opt) return 0;
     if (!encode_audio_has_bitrate(opt->audio_codec)) return 0;
-    for (i = 0; i < src->audio_track_count; i++) {
+    count = src->audio_tracks_stored;
+    if (count <= 0 && src->audio_track_count > 0) {
+        return src->audio_channels > 2;
+    }
+    for (i = 0; i < count; i++) {
+        if (!encode_audio_selected(src, opt, i)) continue;
         if (!encode_audio_track_copies(src, opt, i) &&
             encode_audio_downmix_track(src, opt, i)) {
             return 1;
@@ -206,6 +360,39 @@ int encode_audio_track_copies(const SourceInfo *src, const EncodeOptions *opt,
     source_bps = track_bitrate(src, track_index);
     target_bps = (long long)encode_bitrate_kbps(opt) * 1000;
     return target_bps > 0 && source_bps > 0 && source_bps < target_bps;
+}
+
+long long encode_estimated_audio_bitrate(const SourceInfo *src,
+                                         const EncodeOptions *opt)
+{
+    long long total = 0;
+    int base_kbps, i;
+
+    if (!src || !opt || src->audio_track_count <= 0) return 0;
+    if (opt->audio_codec == ENC_ACODEC_COPY || opt->audio_codec == ENC_ACODEC_FLAC) {
+        return encode_selected_audio_bitrate(src, opt);
+    }
+
+    base_kbps = encode_bitrate_kbps(opt);
+    if (base_kbps <= 0) return encode_selected_audio_bitrate(src, opt);
+
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        int channels, kbps;
+        if (!encode_audio_selected(src, opt, i)) continue;
+        if (encode_audio_track_copies(src, opt, i)) {
+            long long source_bps = track_bitrate(src, i);
+            total += (source_bps > 0) ? source_bps : 128000;
+            continue;
+        }
+        channels = track_channels(src, i);
+        kbps = base_kbps;
+        if (!encode_audio_downmix_track(src, opt, i) && channels > 2) {
+            kbps = kbps * channels / 2;
+            if (kbps > ENC_BITRATE_MAX_KBPS) kbps = ENC_BITRATE_MAX_KBPS;
+        }
+        total += (long long)kbps * 1000;
+    }
+    return total;
 }
 
 int encode_subtitle_is_text(const wchar_t *codec)
@@ -240,6 +427,64 @@ int encode_bitmap_subtitle_count(const SourceInfo *src)
     if (!src) return 0;
     n = src->subtitle_track_count - encode_text_subtitle_count(src);
     return n > 0 ? n : 0;
+}
+
+int encode_subtitle_selected(const SourceInfo *src, const EncodeOptions *opt,
+                             int track_index)
+{
+    if (!src || track_index < 0 || track_index >= src->subtitle_tracks_stored) return 0;
+    if (opt && opt->subtitles_none) return 0;
+    if (!opt || opt->subtitle_mask == 0) return 1;
+    if (track_index >= 32) return 0;
+    return (opt->subtitle_mask & (1u << track_index)) != 0;
+}
+
+int encode_selected_text_subtitle_count(const SourceInfo *src,
+                                        const EncodeOptions *opt)
+{
+    int i, n = 0;
+    if (!src) return 0;
+    for (i = 0; i < src->subtitle_tracks_stored; i++) {
+        if (!encode_subtitle_selected(src, opt, i)) continue;
+        if (encode_subtitle_is_text(src->subtitle_tracks[i].codec)) n++;
+    }
+    return n;
+}
+
+int encode_selected_bitmap_subtitle_count(const SourceInfo *src,
+                                          const EncodeOptions *opt)
+{
+    int i, n = 0;
+    if (!src) return 0;
+    for (i = 0; i < src->subtitle_tracks_stored; i++) {
+        if (!encode_subtitle_selected(src, opt, i)) continue;
+        if (!encode_subtitle_is_text(src->subtitle_tracks[i].codec)) n++;
+    }
+    return n;
+}
+
+int encode_selected_subtitle_count(const SourceInfo *src,
+                                   const EncodeOptions *opt, int container)
+{
+    int i, n = 0;
+    if (!src || src->subtitle_track_count <= 0) return 0;
+    if (opt && opt->subtitles_none) return 0;
+    if (!opt || opt->subtitle_mask == 0) {
+        if (src->subtitle_track_count > src->subtitle_tracks_stored) {
+            return (container == ENC_CONT_MP4)
+                ? encode_text_subtitle_count(src)
+                : src->subtitle_track_count;
+        }
+        if (container == ENC_CONT_MP4) return encode_text_subtitle_count(src);
+        return src->subtitle_tracks_stored;
+    }
+    for (i = 0; i < src->subtitle_tracks_stored; i++) {
+        if (!encode_subtitle_selected(src, opt, i)) continue;
+        if (container == ENC_CONT_MP4 &&
+            !encode_subtitle_is_text(src->subtitle_tracks[i].codec)) continue;
+        n++;
+    }
+    return n;
 }
 
 static void strip_extension(const wchar_t *name, wchar_t *out, size_t cap)
@@ -337,10 +582,13 @@ static const wchar_t *audio_encoder_name(int codec)
 static void build_audio_args(const SourceInfo *src, const EncodeOptions *opt,
                              wchar_t *args, size_t cap)
 {
-    int i;
+    int i, out_index = 0;
+    int fix_layout = (opt->audio_codec == ENC_ACODEC_OPUS ||
+                      opt->audio_codec == ENC_ACODEC_VORBIS);
 
     args[0] = L'\0';
     if (src->audio_track_count <= 0) return;
+    if (encode_selected_audio_count(src, opt) <= 0) return;
 
     if (opt->audio_codec == ENC_ACODEC_COPY) {
         catf(args, cap, L" -c:a copy");
@@ -355,40 +603,98 @@ static void build_audio_args(const SourceInfo *src, const EncodeOptions *opt,
          audio_encoder_name(opt->audio_codec), encode_bitrate_kbps(opt));
 
     for (i = 0; i < src->audio_tracks_stored; i++) {
+        if (!encode_audio_selected(src, opt, i)) continue;
+
         if (encode_audio_track_copies(src, opt, i)) {
-            catf(args, cap, L" -c:a:%d copy", i);
+            catf(args, cap, L" -c:a:%d copy", out_index);
         } else {
+            int channels = track_channels(src, i);
+            int downmix = encode_audio_downmix_track(src, opt, i);
+            const wchar_t *layout = track_layout(src, i);
+            int kbps = encode_bitrate_kbps(opt);
+
+            /* A surround track needs a larger budget than a stereo one.
+               Keep the UI value as the stereo baseline and scale it when the
+               user deliberately keeps the multichannel layout. */
+            if (!downmix && channels > 2) {
+                kbps = kbps * channels / 2;
+                if (kbps > ENC_BITRATE_MAX_KBPS) kbps = ENC_BITRATE_MAX_KBPS;
+            }
+
             catf(args, cap, L" -c:a:%d %ls -b:a:%d %dk",
-                 i, audio_encoder_name(opt->audio_codec),
-                 i, encode_bitrate_kbps(opt));
-            if (encode_audio_downmix_track(src, opt, i)) {
-                catf(args, cap, L" -ac:a:%d 2", i);
+                 out_index, audio_encoder_name(opt->audio_codec),
+                 out_index, kbps);
+
+            if (downmix) {
+                if (fix_layout && channels > 2 && layout_is_known(layout) &&
+                    !opus_layout_is_safe(layout)) {
+                    /* Explicit remap avoids relying on -ac negotiating a
+                       non-canonical source layout in older FFmpeg builds. */
+                    catf(args, cap,
+                         L" -af:a:%d \"aformat=channel_layouts=stereo\"",
+                         out_index);
+                } else {
+                    catf(args, cap, L" -ac:a:%d 2", out_index);
+                }
+            } else if (fix_layout) {
+                const wchar_t *safe = opus_safe_layout(channels);
+                if (channels <= 0 || channels > 8) {
+                    /* libopus cannot represent unknown or >8 channel audio. */
+                    catf(args, cap, L" -ac:a:%d 2", out_index);
+                } else if (channels <= 2) {
+                    catf(args, cap, L" -ac:a:%d %d", out_index, channels);
+                } else if (!opus_layout_is_safe(layout)) {
+                    catf(args, cap, L" -af:a:%d \"aformat=channel_layouts=%ls\"",
+                         out_index, safe ? safe : L"5.1");
+                }
+            }
+            if (opt->audio_codec == ENC_ACODEC_OPUS) {
+                catf(args, cap, L" -ar:a:%d 48000", out_index);
             }
         }
+        out_index++;
     }
 }
 
 static void build_subtitle_args(const SourceInfo *src, const EncodeOptions *opt,
                                 wchar_t *args, size_t cap)
 {
-    int i;
+    int i, mapped = 0;
 
     args[0] = L'\0';
     if (src->subtitle_track_count <= 0) return;
+    if (opt->subtitles_none) return;
 
     if (opt->container == ENC_CONT_MKV) {
-        catf(args, cap, L" -map 0:s? -c:s copy");
+        if (opt->subtitle_mask == 0 &&
+            src->subtitle_track_count > src->subtitle_tracks_stored) {
+            catf(args, cap, L" -map 0:s? -c:s copy");
+            return;
+        }
+        for (i = 0; i < src->subtitle_tracks_stored; i++) {
+            if (!encode_subtitle_selected(src, opt, i)) continue;
+            if (src->subtitle_tracks[i].has_index) {
+                catf(args, cap, L" -map 0:%d", src->subtitle_tracks[i].index);
+            } else {
+                catf(args, cap, L" -map 0:s:%d", i);
+            }
+            mapped++;
+        }
+        if (mapped > 0) catf(args, cap, L" -c:s copy");
         return;
     }
 
     for (i = 0; i < src->subtitle_tracks_stored; i++) {
-        if (encode_subtitle_is_text(src->subtitle_tracks[i].codec)) {
+        if (!encode_subtitle_selected(src, opt, i)) continue;
+        if (!encode_subtitle_is_text(src->subtitle_tracks[i].codec)) continue;
+        if (src->subtitle_tracks[i].has_index) {
+            catf(args, cap, L" -map 0:%d", src->subtitle_tracks[i].index);
+        } else {
             catf(args, cap, L" -map 0:s:%d", i);
         }
+        mapped++;
     }
-    if (encode_text_subtitle_count(src) > 0) {
-        catf(args, cap, L" -c:s mov_text");
-    }
+    if (mapped > 0) catf(args, cap, L" -c:s mov_text");
 }
 
 int encode_build_command(const SourceInfo *src, int encoder, int level,
@@ -402,8 +708,10 @@ int encode_build_command(const SourceInfo *src, int encoder, int level,
     wchar_t video[ENCODE_ARGS_MAX];
     wchar_t audio[ENCODE_ARGS_MAX];
     wchar_t subs[ENCODE_ARGS_MAX];
+    wchar_t maps[4096];
     wchar_t filter[1024];
     wchar_t color[512];
+    int vt, i, selected_audio, use_encoder, use_quality;
 
     if (error) *error = ENCODE_ERR_NONE;
     if (!src || !opt || !out_path || !cmd || cap == 0) {
@@ -422,22 +730,61 @@ int encode_build_command(const SourceInfo *src, int encoder, int level,
         if (error) *error = ENCODE_ERR_PATH;
         return 0;
     }
-    if (!encode_audio_available(opt->container, opt->audio_codec) ||
-        (opt->audio_codec == ENC_ACODEC_COPY &&
-         !encode_audio_copy_available(src, opt->container))) {
+    if (encode_selected_audio_count(src, opt) > 0 &&
+        (!encode_audio_available(opt->container, opt->audio_codec) ||
+         (opt->audio_codec == ENC_ACODEC_COPY &&
+          !encode_audio_copy_available_sel(src, opt, opt->container)))) {
         if (error) *error = ENCODE_ERR_AUDIO;
         return 0;
     }
     if (opt->container == ENC_CONT_MP4 &&
+        opt->subtitle_mask == 0 && !opt->subtitles_none &&
         src->subtitle_tracks_stored < src->subtitle_track_count) {
         if (error) *error = ENCODE_ERR_SUBS;
         return 0;
     }
 
-    if (!presets_video_args_ex(src, encoder, level, opt->video_codec,
-                               video, ENCODE_ARGS_MAX)) {
+    use_encoder = (opt->encoder_override >= 0) ? opt->encoder_override : encoder;
+    use_quality = opt->crf_override;
+    if (use_quality > 0) {
+        if (!presets_video_args_crf(src, use_encoder, opt->video_codec,
+                                    use_quality, video, ENCODE_ARGS_MAX)) {
+            if (error) *error = ENCODE_ERR_CODEC;
+            return 0;
+        }
+    } else if (!presets_video_args_ex(src, use_encoder, level, opt->video_codec,
+                                      video, ENCODE_ARGS_MAX)) {
         if (error) *error = ENCODE_ERR_CODEC;
         return 0;
+    }
+
+    /* Map streams by absolute index. Relying on 0:v:0 / 0:a:N is unsafe for
+       files with cover art or several video angles, and it makes per-track
+       selection impossible. */
+    maps[0] = L'\0';
+    vt = encode_selected_video_track(src, opt);
+    if (src->video_tracks_stored > 0 && vt >= 0 &&
+        vt < src->video_tracks_stored && src->video_tracks[vt].has_index) {
+        catf(maps, 4096, L" -map 0:%d", src->video_tracks[vt].index);
+    } else {
+        catf(maps, 4096, L" -map 0:v:0");
+    }
+
+    selected_audio = encode_selected_audio_count(src, opt);
+    if (src->audio_track_count <= 0 || selected_audio <= 0) {
+        catf(maps, 4096, L" -an");
+    } else if (opt->audio_mask == 0 &&
+               src->audio_track_count > src->audio_tracks_stored) {
+        catf(maps, 4096, L" -map 0:a?");
+    } else {
+        for (i = 0; i < src->audio_tracks_stored; i++) {
+            if (!encode_audio_selected(src, opt, i)) continue;
+            if (src->audio_tracks[i].has_index) {
+                catf(maps, 4096, L" -map 0:%d", src->audio_tracks[i].index);
+            } else {
+                catf(maps, 4096, L" -map 0:a:%d", i);
+            }
+        }
     }
 
     build_audio_args(src, opt, audio, ENCODE_ARGS_MAX);
@@ -457,11 +804,10 @@ int encode_build_command(const SourceInfo *src, int encoder, int level,
 
     _snwprintf(cmd, cap,
         L"%ls -hide_banner -loglevel error -nostats -progress pipe:1 "
-        L"-i %ls -map 0:v:0 %ls %ls%ls %ls %ls -dn "
+        L"-i %ls%ls %ls%ls %ls %ls -dn "
         L"-fps_mode passthrough -map_metadata 0 -map_chapters 0 "
         L"-max_muxing_queue_size 4096%ls%ls -y %ls",
-        q_tool, q_in,
-        src->audio_track_count > 0 ? L"-map 0:a?" : L"-an",
+        q_tool, q_in, maps,
         video, filter, audio, subs, color,
         opt->container == ENC_CONT_MP4
             ? (opt->video_codec == ENC_VCODEC_HEVC
@@ -578,14 +924,25 @@ static int verify_output(const SourceInfo *src, const EncodeOptions *opt,
     }
     free(buf);
 
-    if (out.audio_track_count != src->audio_track_count) return 0;
-    expected_subs = (opt->container == ENC_CONT_MKV)
-        ? src->subtitle_track_count : encode_text_subtitle_count(src);
+    if (out.audio_track_count != encode_selected_audio_count(src, opt)) return 0;
+    expected_subs = encode_selected_subtitle_count(src, opt, opt->container);
     if (out.subtitle_track_count != expected_subs) return 0;
     /* FFmpeg's default autorotate normalizes display orientation, so compare
-       the display size rather than the stored coded size. */
-    if (out.display_width != src->display_width ||
-        out.display_height != src->display_height) return 0;
+       the display size rather than the stored coded size. When the user picks
+       a secondary video stream, verify against that stream instead. */
+    {
+        int vt = encode_selected_video_track(src, opt);
+        if (src->video_tracks_stored > 0 && vt >= 0 &&
+            vt < src->video_tracks_stored &&
+            src->video_tracks[vt].display_width > 0 &&
+            src->video_tracks[vt].display_height > 0) {
+            if (out.display_width != src->video_tracks[vt].display_width ||
+                out.display_height != src->video_tracks[vt].display_height) return 0;
+        } else if (out.display_width != src->display_width ||
+                   out.display_height != src->display_height) {
+            return 0;
+        }
+    }
 
     if (src->duration > 0.0 && out.duration > 0.0) {
         tol = src->duration * 0.02;
@@ -671,10 +1028,21 @@ EncodeResult encode_run(const SourceInfo *src, int encoder, int level,
     }
     if (run != UTIL_RUN_OK || code != 0) {
         detail_tail(buf, len, detail, detail_cap);
+        if (run == UTIL_RUN_START) {
+            if (error) *error = ENCODE_ERR_START;
+        } else if (opt->audio_codec == ENC_ACODEC_OPUS && buf &&
+                   ((strstr(buf, "Invalid channel layout") != NULL &&
+                     strstr(buf, "libopus") != NULL) ||
+                    (strstr(buf, "libopus") != NULL &&
+                     strstr(buf, "Invalid argument") != NULL))) {
+            /* Older FFmpeg builds abort libopus on 5.1(side)/7.1(wide).
+               Report a useful hint instead of a generic muxer error. */
+            if (error) *error = ENCODE_ERR_AUDIO_LAYOUT;
+        } else {
+            if (error) *error = ENCODE_ERR_FFMPEG;
+        }
         free(buf);
         DeleteFileW(partial);
-        if (error) *error = (run == UTIL_RUN_START) ? ENCODE_ERR_START
-                                                    : ENCODE_ERR_FFMPEG;
         return ENCODE_ERROR;
     }
     free(buf);

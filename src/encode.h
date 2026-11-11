@@ -41,6 +41,13 @@ typedef struct {
     int bitrate;         /* EncodeBitratePreset */
     int custom_kbps;
     int downmix_stereo;
+    unsigned int audio_mask; /* 0 = every stored audio track, otherwise bit i */
+    int audio_none;      /* explicitly drop every audio track */
+    int video_track;     /* index into SourceInfo.video_tracks, -1 = primary */
+    unsigned int subtitle_mask; /* 0 = every stored subtitle track, else bit i */
+    int subtitles_none;  /* explicitly drop every subtitle */
+    int encoder_override; /* -1 = auto/recommended, otherwise HwEncoderId */
+    int crf_override;     /* 0 = preset level, otherwise explicit quality value */
 } EncodeOptions;
 
 typedef struct {
@@ -69,6 +76,7 @@ typedef enum {
     ENCODE_ERR_FOLDER,
     ENCODE_ERR_START,
     ENCODE_ERR_FFMPEG,
+    ENCODE_ERR_AUDIO_LAYOUT,
     ENCODE_ERR_VERIFY,
     ENCODE_ERR_RENAME,
     ENCODE_ERR_OUT_OF_MEMORY
@@ -83,6 +91,8 @@ typedef enum {
 void encode_options_defaults(EncodeOptions *opt, const SourceInfo *src);
 int  encode_audio_available(int container, int codec);
 int  encode_audio_copy_available(const SourceInfo *src, int container);
+int  encode_audio_copy_available_sel(const SourceInfo *src,
+                                     const EncodeOptions *opt, int container);
 int  encode_default_audio(int container);
 int  encode_audio_has_bitrate(int codec);
 int  encode_audio_min_kbps(int codec);
@@ -94,10 +104,27 @@ int  encode_audio_downmix_track(const SourceInfo *src, const EncodeOptions *opt,
 int  encode_any_downmix(const SourceInfo *src, const EncodeOptions *opt);
 int  encode_audio_track_copies(const SourceInfo *src, const EncodeOptions *opt,
                                int track_index);
+int  encode_audio_selected(const SourceInfo *src, const EncodeOptions *opt,
+                           int track_index);
+int  encode_selected_audio_count(const SourceInfo *src, const EncodeOptions *opt);
+int  encode_selected_video_track(const SourceInfo *src, const EncodeOptions *opt);
+long long encode_audio_total_bitrate(const SourceInfo *src);
+long long encode_selected_audio_bitrate(const SourceInfo *src,
+                                        const EncodeOptions *opt);
+long long encode_estimated_audio_bitrate(const SourceInfo *src,
+                                         const EncodeOptions *opt);
 int  encode_has_multichannel(const SourceInfo *src);
 int  encode_subtitle_is_text(const wchar_t *codec);
 int  encode_text_subtitle_count(const SourceInfo *src);
 int  encode_bitmap_subtitle_count(const SourceInfo *src);
+int  encode_subtitle_selected(const SourceInfo *src, const EncodeOptions *opt,
+                              int track_index);
+int  encode_selected_subtitle_count(const SourceInfo *src,
+                                    const EncodeOptions *opt, int container);
+int  encode_selected_text_subtitle_count(const SourceInfo *src,
+                                         const EncodeOptions *opt);
+int  encode_selected_bitmap_subtitle_count(const SourceInfo *src,
+                                           const EncodeOptions *opt);
 int  encode_preview_output_path(const SourceInfo *src, int container,
                                 wchar_t *out, size_t cap);
 int  encode_build_command(const SourceInfo *src, int encoder, int level,

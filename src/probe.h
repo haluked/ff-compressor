@@ -18,19 +18,46 @@ typedef enum {
 
 #define PROBE_MAX_AUDIO_TRACKS 32
 #define PROBE_MAX_SUBTITLE_TRACKS 64
+#define PROBE_MAX_VIDEO_TRACKS 16
 
 typedef struct {
+    int index;              /* absolute ffprobe stream index, -1 if unknown */
+    int has_index;
+    int default_track;
     wchar_t codec[64];
     wchar_t language[32];
+    wchar_t title[96];
+    wchar_t layout[64];
     int channels;
     int sample_rate;
     long long bitrate;
 } AudioTrackInfo;
 
 typedef struct {
+    int index;              /* absolute ffprobe stream index, -1 if unknown */
+    int has_index;
+    int default_track;
+    int forced;
     wchar_t codec[64];
     wchar_t language[32];
+    wchar_t title[96];
 } SubtitleTrackInfo;
+
+typedef struct {
+    int index;              /* absolute ffprobe stream index, -1 if unknown */
+    int has_index;
+    int default_track;
+    int attached_pic;       /* cover art, not a moving picture */
+    wchar_t codec[64];
+    wchar_t profile[64];
+    int width;
+    int height;
+    int display_width;
+    int display_height;
+    int rotation;
+    double fps;
+    long long bitrate;
+} VideoTrackInfo;
 
 typedef struct {
     wchar_t path[UTIL_PATH_MAX];
@@ -77,9 +104,13 @@ typedef struct {
     long long nb_frames;
 
     int video_track_count;
+    int video_real_count;       /* moving-picture streams, cover art excluded */
+    int video_tracks_stored;
+    int video_primary;          /* index into video_tracks, -1 if unknown */
     int audio_track_count;
     int subtitle_track_count;
 
+    VideoTrackInfo video_tracks[PROBE_MAX_VIDEO_TRACKS];
     AudioTrackInfo audio_tracks[PROBE_MAX_AUDIO_TRACKS];
     int audio_tracks_stored;
     SubtitleTrackInfo subtitle_tracks[PROBE_MAX_SUBTITLE_TRACKS];

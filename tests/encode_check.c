@@ -91,7 +91,7 @@ int wmain(int argc, wchar_t **argv)
     if (argc < 7) {
         wprintf(L"usage: encode_check <input> <mkv|mp4> <h265|h264> "
                 L"<copy|opus|aac|mp3|flac|ac3|eac3|vorbis> <kbps> <level> "
-                L"[runs] [cancel_ms]\n");
+                L"[runs] [cancel_ms] [track_1based] [downmix 0|1]\n");
         return 2;
     }
 
@@ -135,6 +135,13 @@ int wmain(int argc, wchar_t **argv)
         opt.custom_kbps = kbps;
     }
     opt.downmix_stereo = 1;
+    if (argc > 9) {
+        int track = _wtoi(argv[9]);
+        if (track > 0 && track <= PROBE_MAX_AUDIO_TRACKS) {
+            opt.audio_mask = 1u << (track - 1);
+        }
+    }
+    if (argc > 10) opt.downmix_stereo = _wtoi(argv[10]) ? 1 : 0;
     encoder = estimate_choose_encoder(&src, &hw);
 
     if (encode_preview_output_path(&src, opt.container, preview, UTIL_PATH_MAX)) {

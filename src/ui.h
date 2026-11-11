@@ -12,6 +12,8 @@
 #define WM_APP_ENCODE_PROGRESS (WM_APP + 6)
 #define WM_APP_ENCODE_DONE     (WM_APP + 7)
 #define WM_APP_OPEN_CUSTOM     (WM_APP + 8)
+#define WM_APP_CUSTOM_EST_PROGRESS (WM_APP + 9)
+#define WM_APP_CUSTOM_EST_DONE     (WM_APP + 10)
 #define UI_WINDOW_CLASS     L"FfCompressorWindow"
 
 int ui_run(HINSTANCE hInstance, int nCmdShow, const wchar_t *initial_path);
