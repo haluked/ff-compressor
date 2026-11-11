@@ -64,6 +64,16 @@ int util_find_tool(const wchar_t *name, wchar_t *out, size_t cap)
     if (util_file_exists(candidate)) { wcsncpy(out, candidate, cap - 1); out[cap - 1] = L'\0'; return 1; }
 
     if (SearchPathW(NULL, name, L".exe", (DWORD)cap, out, NULL) > 0) {
+        wchar_t bin_dir[UTIL_PATH_MAX];
+        /* In the portable layout a missing bin\ tool is a real install error.
+           Falling through to an unrelated system FFmpeg would silently run an
+           untested version, so fail closed when bin\ exists. */
+        _snwprintf(bin_dir, UTIL_PATH_MAX, L"%ls\\bin", app);
+        bin_dir[UTIL_PATH_MAX - 1] = L'\0';
+        if (GetFileAttributesW(bin_dir) != INVALID_FILE_ATTRIBUTES) {
+            out[0] = L'\0';
+            return 0;
+        }
         out[cap - 1] = L'\0';
         return 1;
     }
@@ -319,6 +329,7 @@ UtilRunResult util_run_lines(const wchar_t *cmd, DWORD timeout_ms,
         cb(line, line_len, user);
         line_len = 0;
     }
+    if (oom) result = UTIL_RUN_OOM;
 
 stop_process:
     if (was_cancelled || timed_out || result == UTIL_RUN_OOM) {

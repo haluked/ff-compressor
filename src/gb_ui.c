@@ -209,7 +209,7 @@ void gb_shadow(HDC hdc, const RECT *body, int offset, COLORREF color)
 void gb_round_window(HWND hWnd, int large)
 {
     RECT rc;
-    HRGN rgn;
+    HRGN rgn = NULL;
     int w, h, r;
 
     if (!hWnd || !IsWindow(hWnd)) return;
@@ -239,7 +239,9 @@ void gb_round_window(HWND hWnd, int large)
         rgn = CreatePolygonRgn(pts, 8, ALTERNATE);
     }
     /* On success, ownership of the region passes to the system. */
-    SetWindowRgn(hWnd, rgn, TRUE);
+    if (rgn) {
+        if (!SetWindowRgn(hWnd, rgn, TRUE)) DeleteObject(rgn);
+    }
 }
 
 void gb_dither(HDC hdc, const RECT *rc, COLORREF color)
@@ -408,7 +410,8 @@ void gb_draw_control(const DRAWITEMSTRUCT *dis, HFONT font, int role,
         text_rc.right -= pad;
         if (pressed) OffsetRect(&text_rc, 0, gb_scale(1));
         gb_text_in(&text_rc, dis->hDC, font, ink, label,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                   DT_NOPREFIX);
 
         if (dis->itemState & ODS_FOCUS) {
             RECT f = rc;
@@ -498,7 +501,8 @@ void gb_draw_control(const DRAWITEMSTRUCT *dis, HFONT font, int role,
         int ax, ay;
         text_rc.right -= gb_scale(16);
         gb_text_in(&text_rc, dis->hDC, font, ink, label,
-                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                   DT_NOPREFIX);
 
         ax = body.right - gb_scale(14);
         ay = body.top + (body.bottom - body.top) / 2 - gb_scale(1);
@@ -512,7 +516,8 @@ void gb_draw_control(const DRAWITEMSTRUCT *dis, HFONT font, int role,
         gb_fill(dis->hDC, &arrow, ink);
     } else {
         gb_text_in(&text_rc, dis->hDC, font, ink, label,
-                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                   DT_NOPREFIX);
     }
 
     if ((dis->itemState & ODS_FOCUS) && !disabled) {
@@ -539,6 +544,8 @@ typedef struct {
     HFONT font;
     int row_h;
     int pad;
+    int first;   /* index of the first visible row */
+    int rows;    /* number of visible rows */
 } GbDropState;
 
 static GbDropState g_drop;
@@ -557,7 +564,8 @@ static void gb_drop_paint(HWND hWnd)
     gb_frame(hdc, &rc, GB_DARKEST, gb_scale(2));
 
     y = g_drop.pad;
-    for (i = 0; i < g_drop.count; i++) {
+    for (i = g_drop.first;
+         i < g_drop.count && i < g_drop.first + g_drop.rows; i++) {
         RECT row;
         RECT text_rc;
         COLORREF ink;
@@ -590,7 +598,8 @@ static void gb_drop_paint(HWND hWnd)
             text_rc.left += gb_scale(6);
         }
         gb_text(hdc, g_drop.font, ink, &text_rc, g_drop.items[i],
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS |
+                DT_NOPREFIX);
 
         y += g_drop.row_h;
     }
@@ -601,10 +610,26 @@ static void gb_drop_paint(HWND hWnd)
 static int gb_drop_row_at(int y)
 {
     int idx;
-    if (y < g_drop.pad) return -1;
+    if (y < g_drop.pad || g_drop.rows <= 0) return -1;
     idx = (y - g_drop.pad) / g_drop.row_h;
+    if (idx < 0 || idx >= g_drop.rows) return -1;
+    idx += g_drop.first;
     if (idx < 0 || idx >= g_drop.count) return -1;
     return idx;
+}
+
+static void gb_drop_ensure_visible(void)
+{
+    if (g_drop.rows <= 0) return;
+    if (g_drop.selected < g_drop.first) {
+        g_drop.first = g_drop.selected;
+    } else if (g_drop.selected >= g_drop.first + g_drop.rows) {
+        g_drop.first = g_drop.selected - g_drop.rows + 1;
+    }
+    if (g_drop.first > g_drop.count - g_drop.rows) {
+        g_drop.first = g_drop.count - g_drop.rows;
+    }
+    if (g_drop.first < 0) g_drop.first = 0;
 }
 
 static LRESULT CALLBACK GbDropProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -639,10 +664,21 @@ static LRESULT CALLBACK GbDropProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
                 return 0;
             } else if (wParam == VK_UP) {
                 if (g_drop.selected > 0) g_drop.selected--;
+                gb_drop_ensure_visible();
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             } else if (wParam == VK_DOWN) {
                 if (g_drop.selected + 1 < g_drop.count) g_drop.selected++;
+                gb_drop_ensure_visible();
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            } else if (wParam == VK_PRIOR || wParam == VK_NEXT) {
+                int step = g_drop.rows > 0 ? g_drop.rows : 1;
+                if (wParam == VK_PRIOR) g_drop.selected -= step;
+                else g_drop.selected += step;
+                if (g_drop.selected < 0) g_drop.selected = 0;
+                if (g_drop.selected >= g_drop.count) g_drop.selected = g_drop.count - 1;
+                gb_drop_ensure_visible();
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             } else if (wParam == VK_RETURN) {
@@ -658,6 +694,18 @@ static LRESULT CALLBACK GbDropProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
                 return 0;
             }
             break;
+
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            int step = (delta > 0) ? -3 : 3;
+            g_drop.first += step;
+            if (g_drop.first > g_drop.count - g_drop.rows) {
+                g_drop.first = g_drop.count - g_drop.rows;
+            }
+            if (g_drop.first < 0) g_drop.first = 0;
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
 
         case WM_MOUSEACTIVATE:
             return MA_ACTIVATE;
@@ -765,12 +813,27 @@ int gb_dropdown_open(HWND owner, const RECT *anchor,
     width = ar.right - ar.left;
     if (width < max_width + gb_scale(34)) width = max_width + gb_scale(34);
     if (width < gb_scale(160)) width = gb_scale(160);
-    height = count * g_drop.row_h + g_drop.pad * 2 + gb_scale(2);
 
     mon = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
     mi.cbSize = sizeof(mi);
     if (GetMonitorInfoW(mon, &mi)) work = mi.rcWork;
     else SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+
+    if (width > work.right - work.left - gb_scale(8)) {
+        width = work.right - work.left - gb_scale(8);
+    }
+    if (width < gb_scale(120)) width = gb_scale(120);
+
+    /* Cap the popup to the work area so long track lists stay usable. */
+    {
+        int max_rows = (work.bottom - work.top - gb_scale(15)) / g_drop.row_h;
+        if (max_rows < 3) max_rows = 3;
+        g_drop.rows = (count < max_rows) ? count : max_rows;
+        if (g_drop.rows < 1) g_drop.rows = 1;
+    }
+    height = g_drop.rows * g_drop.row_h + g_drop.pad * 2 + gb_scale(2);
+    g_drop.first = 0;
+    gb_drop_ensure_visible();
 
     x = pt.x;
     y = pt.y + (ar.bottom - ar.top);
@@ -1156,7 +1219,13 @@ int gb_message_box(HWND owner, const wchar_t *title, const wchar_t *text, UINT f
         WS_POPUP,
         x, y, win_w, win_h,
         owner, NULL, inst, NULL);
-    if (!dlg) return IDCANCEL;
+    if (!dlg) {
+        if (g_msg.font_title) DeleteObject(g_msg.font_title);
+        if (g_msg.font_body) DeleteObject(g_msg.font_body);
+        if (g_msg.font_btn) DeleteObject(g_msg.font_btn);
+        memset(&g_msg, 0, sizeof(g_msg));
+        return IDCANCEL;
+    }
 
     g_msg.hwnd = dlg;
     gb_msg_layout();

@@ -77,12 +77,18 @@ static double parse_speed(const char *buf)
 
 static void cleanup_temp_dir(const wchar_t *dir);
 
+static volatile LONG g_temp_seq = 0;
+
 static void make_temp_dir(wchar_t *out, size_t cap)
 {
     wchar_t base[UTIL_PATH_MAX];
     util_get_temp_dir(base, UTIL_PATH_MAX);
-    _snwprintf(out, cap, L"%lsff-compressor\\demo-%lu", base,
-               (unsigned long)GetCurrentProcessId());
+    /* A PID-only name collides when a new estimate starts before the previous
+       worker has fully unwound, which lets one run delete another run's
+       samples. Include a per-run sequence number instead. */
+    _snwprintf(out, cap, L"%lsff-compressor\\demo-%lu-%lu", base,
+               (unsigned long)GetCurrentProcessId(),
+               (unsigned long)InterlockedIncrement(&g_temp_seq));
     out[cap - 1] = L'\0';
     cleanup_temp_dir(out);
     SHCreateDirectoryExW(NULL, out, NULL);
@@ -110,6 +116,40 @@ static void cleanup_temp_dir(const wchar_t *dir)
         FindClose(h);
     }
     RemoveDirectoryW(dir);
+}
+
+/* Remove demo directories left behind by a previous crash or forced exit.
+   Only directories older than 24 hours are touched, so an estimate running in
+   another instance of the app is never disturbed. */
+void estimate_cleanup_stale_temp(void)
+{
+    wchar_t base[UTIL_PATH_MAX];
+    wchar_t pattern[UTIL_PATH_MAX];
+    WIN32_FIND_DATAW fd;
+    FILETIME now_ft;
+    ULARGE_INTEGER now, then;
+    HANDLE h;
+
+    util_get_temp_dir(base, UTIL_PATH_MAX);
+    _snwprintf(pattern, UTIL_PATH_MAX, L"%lsff-compressor\\demo-*", base);
+    pattern[UTIL_PATH_MAX - 1] = L'\0';
+    h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    GetSystemTimeAsFileTime(&now_ft);
+    now.LowPart = now_ft.dwLowDateTime;
+    now.HighPart = now_ft.dwHighDateTime;
+    do {
+        wchar_t dir[UTIL_PATH_MAX];
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        then.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        then.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        if (now.QuadPart <= then.QuadPart) continue;
+        if (now.QuadPart - then.QuadPart < 864000000000ULL) continue; /* 24 h */
+        _snwprintf(dir, UTIL_PATH_MAX, L"%lsff-compressor\\%ls", base, fd.cFileName);
+        dir[UTIL_PATH_MAX - 1] = L'\0';
+        cleanup_temp_dir(dir);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
 }
 
 int estimate_plan(const SourceInfo *src, int profile,
@@ -168,10 +208,18 @@ int estimate_plan(const SourceInfo *src, int profile,
 
 int estimate_choose_encoder(const SourceInfo *src, const HwInfo *hw)
 {
+    int needs10 = src && (src->is_hdr || src->bit_depth >= 10);
     if (!hw) return HW_ENC_X265;
-    if (src && src->is_hdr && hw->hdr_encoder >= 0 &&
-        hw->enc_ok10[hw->hdr_encoder]) {
-        return hw->hdr_encoder;
+    if (needs10) {
+        if (src->is_hdr && hw->hdr_encoder >= 0 &&
+            hw->enc_ok10[hw->hdr_encoder]) {
+            return hw->hdr_encoder;
+        }
+        if (hw->best10 >= 0 && hw->enc_ok10[hw->best10]) return hw->best10;
+        if (hw->recommended >= 0 && hw->enc_ok10[hw->recommended]) {
+            return hw->recommended;
+        }
+        return HW_ENC_X265;
     }
     if (hw->recommended >= 0 && hw->enc_ok8[hw->recommended]) {
         return hw->recommended;
@@ -195,7 +243,8 @@ int estimate_demo_seconds(const SourceInfo *src, const HwInfo *hw, int profile_o
     enc = estimate_choose_encoder(src, hw);
     speed = 0.0;
     if (hw) {
-        if (src->is_hdr && hw->speed10_median[enc] > 0.0) speed = hw->speed10_median[enc];
+        if ((src->is_hdr || src->bit_depth >= 10) &&
+            hw->speed10_median[enc] > 0.0) speed = hw->speed10_median[enc];
         else speed = hw->speed8_median[enc];
     }
     if (speed <= 0.0) speed = 1.5;
@@ -230,7 +279,7 @@ static double run_ssim(const SourceInfo *src, const wchar_t *sample_path,
     wchar_t q_tool[UTIL_PATH_MAX + 4];
     wchar_t q_src[UTIL_PATH_MAX + 4];
     wchar_t q_sample[UTIL_PATH_MAX + 4];
-    wchar_t cmd[UTIL_PATH_MAX * 2 + 1024];
+    wchar_t cmd[UTIL_PATH_MAX * 3 + 2048];
     wchar_t pix[32];
     char *buf = NULL;
     size_t len = 0;
@@ -269,7 +318,7 @@ static int extract_preview_frame(const SourceInfo *src, const wchar_t *input_pat
     wchar_t q_tool[UTIL_PATH_MAX + 4];
     wchar_t q_in[UTIL_PATH_MAX + 4];
     wchar_t q_out[UTIL_PATH_MAX + 4];
-    wchar_t cmd[UTIL_PATH_MAX * 2 + 1024];
+    wchar_t cmd[UTIL_PATH_MAX * 3 + 2048];
     wchar_t filter[768];
     char *buf = NULL;
     size_t len = 0;
@@ -325,7 +374,7 @@ static int run_and_measure(const SourceInfo *src, int encoder, int level,
                            int keep_file, volatile int *cancel, double *speed_out,
                            double *bytes_out, double *wall_out)
 {
-    wchar_t cmd[UTIL_PATH_MAX * 2 + 1024];
+    wchar_t cmd[UTIL_PATH_MAX * 3 + 2048];
     char *buf = NULL;
     size_t len = 0;
     DWORD code = 0;
@@ -668,7 +717,7 @@ EstimateResult estimate_run_custom(const SourceInfo *src, const HwInfo *hw,
 {
     wchar_t tempdir[UTIL_PATH_MAX];
     wchar_t sample_path[UTIL_PATH_MAX];
-    wchar_t cmd[UTIL_PATH_MAX * 2 + 1024];
+    wchar_t cmd[UTIL_PATH_MAX * 3 + 2048];
     SourceInfo sample_src;
     double positions[4] = { 0, 0, 0, 0 };
     double speeds[4];

@@ -1,4 +1,4 @@
-# Real test media (M3)
+# Real test media (M4)
 
 These files live in `tests/media/real/`, which is gitignored. They are used only
 for local estimate verification and are not part of the shipped application.
@@ -27,13 +27,14 @@ CC BY encodes above.
 The 10–30 s real clips are deliberately not committed. Re-download them into
 `tests/media/real/` if you need to repeat the estimate verification.
 
-## M3 verification result
+## M4 verification result
 
 5 clips × 4 quality levels = 20 checks, all with the recommended AMD AMF HEVC
-encoder and the Balanced profile. Every check passed the targets:
+encoder and the Balanced profile.
 
-- size error: **+2.1% to -11.0%** (target ±20%)
-- time error: **-23.2% to +29.0%** (target ±30%)
+- size error: **-11.0% to +2.1%** (target ±20%), all 20 checks passed
+- time error: 19 of 20 checks within ±30%; Sintel Balanced measured **-30.7%**
+  and is treated as a borderline miss rather than tuning the model to one clip
 - sample-test durations: 9.8–36.5 s per clip (Balanced: 3 clips × 4 s × 4 levels)
 
 These clips have no audio track, so the audio part of the estimate (source

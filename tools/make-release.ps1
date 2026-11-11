@@ -5,7 +5,7 @@
 # checksums and a source archive for GPL compliance.
 
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.1.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +22,18 @@ function Require-File([string]$Path, [string]$Label) {
     if (-not (Test-Path $Path -PathType Leaf)) {
         throw "$Label not found: $Path"
     }
+}
+
+# Rebuild so the packaged EXE always comes from the same commit as source.zip.
+Push-Location $ProjectRoot
+try {
+    $build = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "build.bat" `
+        -NoNewWindow -Wait -PassThru
+    if ($build.ExitCode -ne 0) {
+        throw "build.bat failed (exit $($build.ExitCode))"
+    }
+} finally {
+    Pop-Location
 }
 
 Require-File $Exe "App executable"
@@ -57,6 +69,9 @@ Copy-Item $FfmpegBuild (Join-Path $Stage "bin\FFMPEG_BUILD.txt")
 Copy-Item (Join-Path $ProjectRoot "LICENSE") $Stage
 Copy-Item (Join-Path $ProjectRoot "THIRD_PARTY_NOTICES.md") $Stage
 Copy-Item (Join-Path $ProjectRoot "README.md") $Stage
+if (Test-Path (Join-Path $ProjectRoot "docs")) {
+    Copy-Item (Join-Path $ProjectRoot "docs") $Stage -Recurse
+}
 Copy-Item (Join-Path $ProjectRoot "licenses\FFmpeg-BUILD.txt") (Join-Path $Stage "licenses")
 
 $sourceZip = Join-Path $Stage "source.zip"

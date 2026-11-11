@@ -13,7 +13,7 @@
 #include <wchar.h>
 #include <math.h>
 
-#define ENCODE_CMD_MAX 16384
+#define ENCODE_CMD_MAX 24576
 #define ENCODE_ARGS_MAX 8192
 
 static void catf(wchar_t *dst, size_t cap, const wchar_t *fmt, ...)
@@ -200,6 +200,9 @@ int encode_audio_min_kbps(int codec)
     if (codec == ENC_ACODEC_AC3 || codec == ENC_ACODEC_EAC3) {
         return ENC_BITRATE_HIGH_KBPS;
     }
+    if (codec == ENC_ACODEC_VORBIS) {
+        return ENC_BITRATE_VORBIS_MIN_KBPS;
+    }
     return ENC_BITRATE_MIN_KBPS;
 }
 
@@ -347,15 +350,58 @@ int encode_any_downmix(const SourceInfo *src, const EncodeOptions *opt)
     return 0;
 }
 
+static const wchar_t *audio_codec_name(int codec)
+{
+    switch (codec) {
+        case ENC_ACODEC_OPUS:   return L"opus";
+        case ENC_ACODEC_AAC:    return L"aac";
+        case ENC_ACODEC_MP3:    return L"mp3";
+        case ENC_ACODEC_FLAC:   return L"flac";
+        case ENC_ACODEC_AC3:    return L"ac3";
+        case ENC_ACODEC_EAC3:   return L"eac3";
+        case ENC_ACODEC_VORBIS: return L"vorbis";
+        default:                return NULL;
+    }
+}
+
+static int container_accepts_copy_codec(int container, const wchar_t *codec)
+{
+    if (!codec) return 0;
+    if (container != ENC_CONT_MP4) return 1;
+    return _wcsicmp(codec, L"aac") == 0 || _wcsicmp(codec, L"mp3") == 0 ||
+           _wcsicmp(codec, L"ac3") == 0 || _wcsicmp(codec, L"eac3") == 0 ||
+           _wcsicmp(codec, L"alac") == 0;
+}
+
+/* A track may only be copied as-is when the source codec already matches the
+   codec the user asked for and the target container accepts it.  Otherwise
+   the requested conversion must actually happen. */
 int encode_audio_track_copies(const SourceInfo *src, const EncodeOptions *opt,
                               int track_index)
 {
+    const wchar_t *source_codec;
+    const wchar_t *wanted_codec;
     long long source_bps;
     long long target_bps;
 
     if (!src || !opt) return 0;
-    if (opt->audio_codec == ENC_ACODEC_COPY) return 1;
+    if (track_index < 0 || track_index >= src->audio_tracks_stored) return 0;
+    source_codec = src->audio_tracks[track_index].codec;
+
+    if (opt->audio_codec == ENC_ACODEC_COPY) {
+        return container_accepts_copy_codec(opt->container, source_codec);
+    }
     if (!encode_audio_has_bitrate(opt->audio_codec)) return 0;
+
+    wanted_codec = audio_codec_name(opt->audio_codec);
+    if (!wanted_codec || _wcsicmp(source_codec, wanted_codec) != 0) return 0;
+    if (!container_accepts_copy_codec(opt->container, source_codec)) return 0;
+    /* Do not bypass an explicitly requested stereo downmix or a codec whose
+       target encoder is stereo-only. */
+    if (track_channels(src, track_index) > 2 &&
+        (opt->downmix_stereo || encode_audio_force_stereo(opt->audio_codec))) {
+        return 0;
+    }
 
     source_bps = track_bitrate(src, track_index);
     target_bps = (long long)encode_bitrate_kbps(opt) * 1000;
@@ -435,8 +481,8 @@ int encode_subtitle_selected(const SourceInfo *src, const EncodeOptions *opt,
     if (!src || track_index < 0 || track_index >= src->subtitle_tracks_stored) return 0;
     if (opt && opt->subtitles_none) return 0;
     if (!opt || opt->subtitle_mask == 0) return 1;
-    if (track_index >= 32) return 0;
-    return (opt->subtitle_mask & (1u << track_index)) != 0;
+    if (track_index >= 64) return 0;
+    return (opt->subtitle_mask & (1ull << track_index)) != 0;
 }
 
 int encode_selected_text_subtitle_count(const SourceInfo *src,
@@ -515,7 +561,7 @@ static int build_candidate(const wchar_t *folder, const wchar_t *base,
     }
     name[1023] = L'\0';
     if (!util_join_path(out, cap, folder, name)) return 0;
-    return wcslen(out) < cap - 8;
+    return wcslen(out) < cap - 24;
 }
 
 static int choose_output(const SourceInfo *src, int container,
@@ -648,12 +694,28 @@ static void build_audio_args(const SourceInfo *src, const EncodeOptions *opt,
                          out_index, safe ? safe : L"5.1");
                 }
             }
-            if (opt->audio_codec == ENC_ACODEC_OPUS) {
+            if (opt->audio_codec == ENC_ACODEC_OPUS ||
+                opt->audio_codec == ENC_ACODEC_VORBIS) {
                 catf(args, cap, L" -ar:a:%d 48000", out_index);
             }
         }
         out_index++;
     }
+}
+
+/* Matroska accepts SRT/ASS/SSA/WebVTT text and the common bitmap formats.
+   Other text codecs, most notably mov_text, must be converted: copying them
+   into MKV makes FFmpeg abort the whole encode. */
+static int mkv_subtitle_copy_ok(const wchar_t *codec)
+{
+    if (!codec || !*codec) return 1;
+    if (_wcsicmp(codec, L"subrip") == 0 || _wcsicmp(codec, L"srt") == 0 ||
+        _wcsicmp(codec, L"ass") == 0 || _wcsicmp(codec, L"ssa") == 0 ||
+        _wcsicmp(codec, L"webvtt") == 0) {
+        return 1;
+    }
+    if (!encode_subtitle_is_text(codec)) return 1;
+    return 0;
 }
 
 static void build_subtitle_args(const SourceInfo *src, const EncodeOptions *opt,
@@ -680,7 +742,17 @@ static void build_subtitle_args(const SourceInfo *src, const EncodeOptions *opt,
             }
             mapped++;
         }
-        if (mapped > 0) catf(args, cap, L" -c:s copy");
+        if (mapped > 0) {
+            int out_sub = 0;
+            catf(args, cap, L" -c:s copy");
+            for (i = 0; i < src->subtitle_tracks_stored; i++) {
+                if (!encode_subtitle_selected(src, opt, i)) continue;
+                if (!mkv_subtitle_copy_ok(src->subtitle_tracks[i].codec)) {
+                    catf(args, cap, L" -c:s:%d srt", out_sub);
+                }
+                out_sub++;
+            }
+        }
         return;
     }
 
@@ -890,6 +962,50 @@ static void detail_tail(const char *buf, size_t len, wchar_t *out, size_t cap)
     }
 }
 
+static int verify_audio_codecs(const SourceInfo *src, const EncodeOptions *opt,
+                               const SourceInfo *out)
+{
+    int i, out_index = 0;
+
+    if (out->audio_track_count != encode_selected_audio_count(src, opt)) return 0;
+    if (out->audio_tracks_stored < out->audio_track_count) return 1;
+    for (i = 0; i < src->audio_tracks_stored; i++) {
+        const wchar_t *wanted;
+        if (!encode_audio_selected(src, opt, i)) continue;
+        if (out_index >= out->audio_tracks_stored) return 0;
+        if (encode_audio_track_copies(src, opt, i)) {
+            out_index++;
+            continue;
+        }
+        wanted = audio_codec_name(opt->audio_codec);
+        if (wanted && _wcsicmp(out->audio_tracks[out_index].codec, wanted) != 0) {
+            return 0;
+        }
+        out_index++;
+    }
+    return 1;
+}
+
+static int verify_subtitle_codecs(const SourceInfo *src, const EncodeOptions *opt,
+                                  const SourceInfo *out)
+{
+    int i;
+
+    if (out->subtitle_track_count !=
+        encode_selected_subtitle_count(src, opt, opt->container)) {
+        return 0;
+    }
+    if (out->subtitle_tracks_stored < out->subtitle_track_count) return 1;
+    for (i = 0; i < out->subtitle_tracks_stored; i++) {
+        if (opt->container == ENC_CONT_MP4) {
+            if (_wcsicmp(out->subtitle_tracks[i].codec, L"mov_text") != 0) return 0;
+        } else if (_wcsicmp(out->subtitle_tracks[i].codec, L"mov_text") == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int verify_output(const SourceInfo *src, const EncodeOptions *opt,
                          const wchar_t *path)
 {
@@ -927,6 +1043,8 @@ static int verify_output(const SourceInfo *src, const EncodeOptions *opt,
     if (out.audio_track_count != encode_selected_audio_count(src, opt)) return 0;
     expected_subs = encode_selected_subtitle_count(src, opt, opt->container);
     if (out.subtitle_track_count != expected_subs) return 0;
+    if (!verify_audio_codecs(src, opt, &out)) return 0;
+    if (!verify_subtitle_codecs(src, opt, &out)) return 0;
     /* FFmpeg's default autorotate normalizes display orientation, so compare
        the display size rather than the stored coded size. When the user picks
        a secondary video stream, verify against that stream instead. */

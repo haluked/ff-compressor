@@ -392,7 +392,28 @@ static void test_estimates(void)
     count = estimate_plan(&src, HW_PROFILE_THOROUGH, levels, &count, &clips, &clip_sec);
     CHECK(count == 4 && clips == 4, "Thorough plan is 4 levels x 4 clips");
 
+    src.duration = 3600.0;
+    count = estimate_plan(&src, HW_PROFILE_BALANCED, levels, &count, &clips, &clip_sec);
+    CHECK(clips == 4 && clip_sec > 4.9 && clip_sec < 5.1,
+          "long films use 4 x 5 s samples");
+    src.duration = 7200.0;
+    count = estimate_plan(&src, HW_PROFILE_BALANCED, levels, &count, &clips, &clip_sec);
+    CHECK(clips == 4 && clip_sec > 5.9 && clip_sec < 6.1,
+          "very long films use 4 x 6 s samples");
+    src.duration = 30.0;
+
     CHECK(estimate_choose_encoder(&src, &hw) == HW_ENC_AMF, "estimate chooses AMF");
+    src.bit_depth = 10;
+    hw.best10 = HW_ENC_QSV;
+    hw.enc_ok10[HW_ENC_QSV] = 1;
+    CHECK(estimate_choose_encoder(&src, &hw) == HW_ENC_QSV,
+          "10-bit SDR chooses a verified 10-bit encoder");
+    hw.best10 = -1;
+    hw.enc_ok10[HW_ENC_QSV] = 0;
+    CHECK(estimate_choose_encoder(&src, &hw) == HW_ENC_X265,
+          "10-bit SDR falls back to CPU when only 8-bit GPUs passed");
+    src.bit_depth = 8;
+    hw.best10 = -1;
     CHECK(estimate_next_encoder(HW_ENC_NVENC, 1, &fell_back) == HW_ENC_X265,
           "estimate falls back from NVENC");
     CHECK(fell_back == 1, "estimate records fallback");
@@ -486,6 +507,7 @@ static void test_encode_options(void)
     CHECK(!encode_audio_has_bitrate(ENC_ACODEC_COPY), "copy has no bitrate");
     CHECK(!encode_audio_has_bitrate(ENC_ACODEC_FLAC), "FLAC has no bitrate");
     CHECK(encode_audio_min_kbps(ENC_ACODEC_AC3) == 64, "AC-3 minimum is 64k");
+    CHECK(encode_audio_min_kbps(ENC_ACODEC_VORBIS) == 32, "Vorbis minimum is 32k");
     CHECK(encode_audio_force_stereo(ENC_ACODEC_MP3), "MP3 forces stereo");
     opt.audio_codec = ENC_ACODEC_AC3;
     opt.bitrate = ENC_ABITRATE_VOICE;
@@ -510,13 +532,20 @@ static void test_encode_options(void)
     CHECK(encode_bitrate_kbps(&opt) == 36, "Music is 36k");
     CHECK(!encode_audio_track_copies(&src, &opt, 0), "48k Opus source is re-encoded at 36k target");
     CHECK(!encode_audio_track_copies(&src, &opt, 1), "128k AAC source is re-encoded");
-    CHECK(encode_audio_track_copies(&src, &opt, 2), "24k MP3 source is copied");
+    CHECK(encode_audio_track_copies(&src, &opt, 2) == 0,
+          "24k MP3 source is re-encoded when Opus was requested");
+    wcscpy(src.audio_tracks[2].codec, L"opus");
+    CHECK(encode_audio_track_copies(&src, &opt, 2),
+          "same-codec smaller track is copied");
+    wcscpy(src.audio_tracks[2].codec, L"mp3");
     CHECK(encode_has_multichannel(&src), "source has multichannel audio");
     CHECK(encode_audio_downmix_track(&src, &opt, 1), "5.1 track is downmixed");
     CHECK(encode_any_downmix(&src, &opt), "downmix is proposed for an encoded 5.1 track");
     src.audio_tracks[1].bitrate = 32000;
-    CHECK(encode_audio_track_copies(&src, &opt, 1), "low-bitrate 5.1 track is copied");
-    CHECK(!encode_any_downmix(&src, &opt), "copied 5.1 track needs no downmix");
+    CHECK(!encode_audio_track_copies(&src, &opt, 1),
+          "5.1 track is re-encoded when a downmix was requested");
+    CHECK(encode_any_downmix(&src, &opt),
+          "requested downmix still applies to the 5.1 track");
     src.audio_tracks[1].bitrate = 128000;
     opt.downmix_stereo = 0;
     CHECK(!encode_audio_downmix_track(&src, &opt, 1), "downmix can be disabled");
@@ -601,6 +630,7 @@ static void test_encode_options(void)
     opt.audio_codec = ENC_ACODEC_OPUS;
     opt.bitrate = ENC_ABITRATE_MUSIC;
     opt.downmix_stereo = 1;
+    wcscpy(src.audio_tracks[2].codec, L"opus");
     CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
                                L"C:\\videos\\Compressed\\clip (compressed).mkv",
                                cmd, 16384, &err) == 1, "MKV command builds");
@@ -613,6 +643,13 @@ static void test_encode_options(void)
     CHECK(wcsstr(cmd, L"-map 0:s:1") != NULL, "command maps second subtitle");
     CHECK(wcsstr(cmd, L"-map 0:s?") == NULL, "command maps subtitles individually");
     CHECK(wcsstr(cmd, L"-c:s copy") != NULL, "MKV copies subtitles");
+    wcscpy(src.subtitle_tracks[0].codec, L"mov_text");
+    CHECK(encode_build_command(&src, HW_ENC_AMF, QUALITY_BALANCED, &opt,
+                               L"C:\\videos\\Compressed\\clip (compressed).mkv",
+                               cmd, 16384, &err) == 1, "mov_text command builds");
+    CHECK(wcsstr(cmd, L"-c:s:0 srt") != NULL,
+          "mov_text is converted to SRT for MKV");
+    wcscpy(src.subtitle_tracks[0].codec, L"subrip");
     CHECK(wcsstr(cmd, L"-c:a libopus") != NULL, "Opus encoder is used");
     CHECK(wcsstr(cmd, L"-c:a:2 copy") != NULL, "small audio track overrides to copy");
     CHECK(wcsstr(cmd, L"-ac:a:1 2") != NULL, "5.1 track receives stereo downmix");

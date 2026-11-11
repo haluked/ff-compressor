@@ -44,7 +44,7 @@ typedef struct {
     unsigned int audio_mask; /* 0 = every stored audio track, otherwise bit i */
     int audio_none;      /* explicitly drop every audio track */
     int video_track;     /* index into SourceInfo.video_tracks, -1 = primary */
-    unsigned int subtitle_mask; /* 0 = every stored subtitle track, else bit i */
+    unsigned long long subtitle_mask; /* 0 = every stored subtitle track, else bit i */
     int subtitles_none;  /* explicitly drop every subtitle */
     int encoder_override; /* -1 = auto/recommended, otherwise HwEncoderId */
     int crf_override;     /* 0 = preset level, otherwise explicit quality value */
@@ -87,6 +87,7 @@ typedef enum {
 #define ENC_BITRATE_VOICE_KBPS 24
 #define ENC_BITRATE_MUSIC_KBPS 36
 #define ENC_BITRATE_HIGH_KBPS 64
+#define ENC_BITRATE_VORBIS_MIN_KBPS 32
 
 void encode_options_defaults(EncodeOptions *opt, const SourceInfo *src);
 int  encode_audio_available(int container, int codec);

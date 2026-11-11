@@ -69,7 +69,7 @@
 #define APP_WINDOW_STYLE    (WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU)
 #define APP_WINDOW_EX_STYLE (WS_EX_APPWINDOW | WS_EX_CONTROLPARENT)
 
-#define GB_MAX_TRACKED 32
+#define GB_MAX_TRACKED 48
 typedef struct {
     HWND hwnd;
     WNDPROC old_proc;
@@ -250,6 +250,8 @@ typedef struct {
     int gen;
     EstimateResult result;
     EstimateLevel est;
+    int encoder;
+    int used_fallback;
 } CustomEstDoneMsg;
 
 typedef struct {
@@ -585,6 +587,18 @@ static const wchar_t *subtitle_codec_label(const wchar_t *c)
     return c;
 }
 
+static int wide_contains_ci(const wchar_t *haystack, const wchar_t *needle)
+{
+    size_t nlen;
+    if (!haystack || !needle || !*needle) return 0;
+    nlen = wcslen(needle);
+    while (*haystack) {
+        if (_wcsnicmp(haystack, needle, nlen) == 0) return 1;
+        haystack++;
+    }
+    return 0;
+}
+
 static void format_subtitle_track_item(int index, wchar_t *out, size_t cap)
 {
     const SubtitleTrackInfo *st;
@@ -604,10 +618,17 @@ static void format_subtitle_track_item(int index, wchar_t *out, size_t cap)
         wcsncpy(name, source, 95);
     }
     name[95] = L'\0';
-    if (st->forced) {
-        wcscat(name, L" (");
-        wcscat(name, text(STR_COMP_TRACK_FORCED));
-        wcscat(name, L")");
+    if (st->forced && !wide_contains_ci(name, L"forced")) {
+        wchar_t suffix[32];
+        size_t len, remaining;
+        _snwprintf(suffix, 32, L" (%ls)", text(STR_COMP_TRACK_FORCED));
+        suffix[31] = L'\0';
+        len = wcslen(name);
+        remaining = (len < 95) ? 95 - len : 0;
+        if (remaining > 0) {
+            wcsncat(name, suffix, remaining);
+        }
+        name[95] = L'\0';
     }
     kind = encode_subtitle_is_text(st->codec) ? text(STR_COMP_TRACK_TEXT)
                                               : text(STR_COMP_TRACK_BITMAP);
@@ -1749,10 +1770,29 @@ static double selected_video_source_bps(void)
     return (double)bps;
 }
 
+static int preset_estimate_applies(void)
+{
+    if (!g_quality_has_result) return 0;
+    if (g_enc_options_ready) {
+        if (g_enc_opt.crf_override > 0) return 0;
+        if (g_enc_opt.video_codec != ENC_VCODEC_HEVC) return 0;
+        if (g_enc_opt.encoder_override >= 0 &&
+            g_enc_opt.encoder_override != g_est.encoder) {
+            return 0;
+        }
+        if (g_info.video_primary >= 0 &&
+            encode_selected_video_track(&g_info, &g_enc_opt) != g_info.video_primary) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static double compress_video_bytes(void)
 {
     EstimateLevel *sel;
     if (g_custom_est_ready) return g_custom_est.video_size_bytes;
+    if (!preset_estimate_applies()) return 0.0;
     sel = quality_level_result(g_quality_selected);
     return (sel && sel->available) ? sel->video_size_bytes : 0.0;
 }
@@ -1761,6 +1801,7 @@ static double compress_video_seconds(void)
 {
     EstimateLevel *sel;
     if (g_custom_est_ready) return g_custom_est.est_seconds;
+    if (!preset_estimate_applies()) return 0.0;
     sel = quality_level_result(g_quality_selected);
     return (sel && sel->available) ? sel->est_seconds : 0.0;
 }
@@ -2031,11 +2072,11 @@ static void draw_compress_progress(HDC hdc)
     int percent = (int)(g_encode_progress.fraction * 100.0);
     int elapsed = (int)((GetTickCount64() - g_encode_start_tick) / 1000);
     int total = 0;
-    EstimateLevel *sel = quality_level_result(g_quality_selected);
+    double estimated = compress_video_seconds();
 
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
-    if (sel && sel->available) total = (int)(sel->est_seconds + 0.5);
+    if (estimated > 0.0) total = (int)(estimated + 0.5);
 
     SetRect(&r, S(32), S(112), S(614), S(132));
     gb_text(hdc, g_fontBold, GB_DARKEST, &r,
@@ -2920,7 +2961,18 @@ static void quality_ui_start(HWND hWnd, int force)
         ? (int)(g_quality_last_seconds + 0.5)
         : estimate_demo_seconds(&g_info, &g_hw_info, quality_current_profile());
     if (g_quality_deep) {
-        g_est_seconds = g_est_seconds * 2 + 3;
+        int levels[ESTIMATE_MAX_LEVELS], level_count = 0, clips = 0;
+        double clip_sec = 0.0;
+        estimate_plan(&g_info, quality_current_profile(), levels, &level_count,
+                      &clips, &clip_sec);
+        if (level_count > 0 && clips > 0 && clip_sec > 0.0) {
+            /* DEEP always uses 4 x 6 s per level; scale from the normal
+               sample budget instead of a fixed multiplier. */
+            double ratio = (4.0 * 6.0) / ((double)clips * clip_sec);
+            g_est_seconds = (int)((double)g_est_seconds * ratio + 0.5);
+        } else {
+            g_est_seconds = g_est_seconds * 2 + 3;
+        }
     }
     set_status_id(STR_STATUS_QUALITY_TESTING, 0);
     update_controls_visibility();
@@ -2958,6 +3010,16 @@ static void quality_ui_start_deep(HWND hWnd)
     quality_ui_start(hWnd, 1);
 }
 
+static int encoder_usable_for_source(int enc)
+{
+    if (enc == HW_ENC_X265) return 1;
+    if (enc < 0 || enc >= HW_ENC_COUNT) return 0;
+    if (g_info.is_hdr || g_info.bit_depth >= 10) {
+        return g_hw_info.enc_ok10[enc] != 0;
+    }
+    return g_hw_info.enc_ok8[enc] || g_hw_info.enc_ok10[enc];
+}
+
 static void quality_ui_refresh_encoder_items(void)
 {
     int i;
@@ -2974,7 +3036,7 @@ static void quality_ui_refresh_encoder_items(void)
 
     for (i = 0; i < HW_ENC_COUNT && g_quality_enc_count < HW_ENC_COUNT + 1; i++) {
         if (i == HW_ENC_X265) continue;
-        if (!g_hw_info.enc_ok8[i] && !g_hw_info.enc_ok10[i]) continue;
+        if (!encoder_usable_for_source(i)) continue;
         g_quality_enc_map[g_quality_enc_count] = i;
         _snwprintf(g_quality_enc_items[g_quality_enc_count], 64,
                    text(STR_QUALITY_ENC_GPU_FMT), hw_encoder_name(i));
@@ -2997,6 +3059,9 @@ static void quality_ui_encoder_picked(int index, void *user)
 {
     (void)user;
     if (index < 0 || index >= g_quality_enc_count) return;
+    if (g_quality_encoder != g_quality_enc_map[index]) {
+        g_quality_last_seconds = 0.0;
+    }
     g_quality_encoder = g_quality_enc_map[index];
     if (!g_enc_options_ready) {
         encode_options_defaults(&g_enc_opt, &g_info);
@@ -3037,6 +3102,13 @@ static void quality_ui_on_done(HWND hWnd, EstimateDoneMsg *msg)
         g_est = msg->est;
         g_quality_has_result = 1;
         g_quality_last_seconds = g_est.total_seconds;
+        if (g_est.used_fallback) {
+            /* The estimate fell back to CPU x265 after the GPU test failed.
+               The actual encode must follow the estimate, not the encoder the
+               user picked before the failure. */
+            g_quality_encoder = -1;
+            if (g_enc_options_ready) g_enc_opt.encoder_override = -1;
+        }
         quality_ui_update_selection();
         if (g_est.used_fallback) set_status_text(text(STR_QUALITY_FALLBACK), 0);
         else set_status_id(STR_QUALITY_DONE, 0);
@@ -3302,6 +3374,7 @@ static void encode_ui_enter(HWND hWnd)
     memset(&g_encode_progress, 0, sizeof(g_encode_progress));
     set_status_text(text(STR_COMP_HEADING), 0);
     update_controls_visibility();
+    encode_ui_restart_custom_test(hWnd);
     InvalidateRect(hWnd, NULL, FALSE);
     SetFocus(g_hBtnStart);
 }
@@ -3513,8 +3586,8 @@ static void encode_ui_subtitle_track_picked(int index, void *user)
     } else {
         int track = index - 2;
         g_enc_opt.subtitles_none = 0;
-        if (track >= 0 && track < g_info.subtitle_tracks_stored && track < 32) {
-            g_enc_opt.subtitle_mask = 1u << track;
+        if (track >= 0 && track < g_info.subtitle_tracks_stored && track < 64) {
+            g_enc_opt.subtitle_mask = 1ull << track;
         }
     }
     update_controls_visibility();
@@ -3537,7 +3610,7 @@ static void encode_ui_open_subtitle_track_dropdown(HWND hWnd)
 
     for (i = 0; i < g_info.subtitle_tracks_stored && count < PROBE_MAX_SUBTITLE_TRACKS + 2; i++) {
         format_subtitle_track_item(i, g_sub_items[count], 160);
-        if (g_enc_opt.subtitle_mask == (1u << i)) selected = count;
+        if (g_enc_opt.subtitle_mask == (1ull << i)) selected = count;
         ptrs[count] = g_sub_items[count];
         count++;
     }
@@ -3564,8 +3637,10 @@ static void encode_ui_refresh_subtitle_button(void)
     if (g_enc_opt.subtitles_none) {
         wcsncpy(buf, text(STR_COMP_SUBTITLE_TRACK_NONE_FMT), 95);
     } else if (g_enc_opt.subtitle_mask == 0) {
-        _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ALL_FMT),
-                   g_info.subtitle_tracks_stored);
+        int all = (g_enc_opt.container == ENC_CONT_MP4)
+            ? encode_text_subtitle_count(&g_info)
+            : g_info.subtitle_tracks_stored;
+        _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ALL_FMT), all);
     } else if (selected == 1) {
         _snwprintf(buf, 96, text(STR_COMP_SUBTITLE_TRACK_ONE_FMT), selected);
     } else {
@@ -3674,8 +3749,7 @@ static void encode_ui_open_advanced(HWND hWnd)
     g_adv_enc_items[g_adv_enc_count][47] = L'\0';
     g_adv_enc_count++;
     for (i = 0; i < HW_ENC_COUNT; i++) {
-        int available = (i == HW_ENC_X265) || g_hw_info.enc_ok8[i] ||
-                        g_hw_info.enc_ok10[i];
+        int available = encoder_usable_for_source(i);
         if (!available) continue;
         g_adv_enc_map[g_adv_enc_count] = i;
         wcsncpy(g_adv_enc_items[g_adv_enc_count], hw_encoder_name(i), 47);
@@ -3740,23 +3814,33 @@ static void encode_ui_accept_advanced(HWND hWnd)
     }
 
     if (g_adv_quality == 5) {
+        /* Archive is defined as CPU x265 CRF 19, so make the video codec
+           match instead of silently producing libx264 under an x265 label. */
+        g_enc_opt.video_codec = ENC_VCODEC_HEVC;
         g_enc_opt.encoder_override = HW_ENC_X265;
         g_enc_opt.crf_override = 19;
+        g_quality_encoder = HW_ENC_X265;
     } else if (g_adv_quality == 6) {
         g_enc_opt.encoder_override = g_adv_encoder;
         g_enc_opt.crf_override = g_adv_crf;
+        g_quality_encoder = g_adv_encoder;
     } else if (g_adv_quality >= 1 && g_adv_quality <= 4) {
         g_quality_selected = g_adv_quality - 1;
         g_enc_opt.encoder_override = g_adv_encoder;
         g_enc_opt.crf_override = 0;
+        g_quality_encoder = g_adv_encoder;
     } else {
         g_enc_opt.encoder_override = g_adv_encoder;
         g_enc_opt.crf_override = 0;
+        g_quality_encoder = g_adv_encoder;
+    }
+    if (g_quality_encoder >= 0 && g_quality_encoder != g_est.encoder) {
+        g_quality_last_seconds = 0.0;
     }
 
     g_advanced_active = 0;
     if (was_quality) encode_ui_enter(hWnd);
-    encode_ui_restart_custom_test(hWnd);
+    else encode_ui_restart_custom_test(hWnd);
     update_controls_visibility();
     InvalidateRect(hWnd, NULL, FALSE);
 }
@@ -3782,6 +3866,8 @@ typedef struct {
     int video_codec;
     int video_track;
     int quality;
+    int preset_level;
+    int quality_level;
     int clips;
     double clip_seconds;
     SourceInfo src;
@@ -3794,12 +3880,33 @@ static DWORD WINAPI custom_est_thread_proc(LPVOID param)
     msg = (CustomEstDoneMsg*)calloc(1, sizeof(CustomEstDoneMsg));
     if (!msg) { free(job); return 0; }
     msg->gen = job->gen;
+    msg->encoder = job->encoder;
     msg->result = estimate_run_custom(&job->src, NULL, job->encoder,
                                       job->video_codec, job->quality,
                                       job->video_track, job->clips,
                                       job->clip_seconds, &msg->est,
                                       custom_est_progress_cb, job,
                                       &g_custom_est_cancel);
+    if (msg->result == ESTIMATE_ERROR && job->encoder != HW_ENC_X265) {
+        int retry_quality = job->quality;
+        /* Match the main estimate: if the hardware encoder cannot run the
+           sample, retry on CPU x265 and report the actual encoder. Preset
+           values are encoder-specific, so translate them to x265 CRF. */
+        if (job->preset_level) {
+            int translated = presets_quality_value(HW_ENC_X265,
+                                                   job->quality_level,
+                                                   job->video_codec);
+            if (translated > 0) retry_quality = translated;
+        }
+        msg->encoder = HW_ENC_X265;
+        msg->result = estimate_run_custom(&job->src, NULL, HW_ENC_X265,
+                                          job->video_codec, retry_quality,
+                                          job->video_track, job->clips,
+                                          job->clip_seconds, &msg->est,
+                                          custom_est_progress_cb, job,
+                                          &g_custom_est_cancel);
+        if (msg->result == ESTIMATE_OK) msg->used_fallback = 1;
+    }
     if (!PostMessageW(job->hwnd, WM_APP_CUSTOM_EST_DONE, 0, (LPARAM)msg)) free(msg);
     free(job);
     return 0;
@@ -3813,7 +3920,8 @@ static void encode_ui_start_custom_test(HWND hWnd)
     if (!g_has_info || g_custom_est_testing) return;
     encoder = g_enc_opt.encoder_override >= 0
         ? g_enc_opt.encoder_override
-        : estimate_choose_encoder(&g_info, &g_hw_info);
+        : (g_quality_has_result ? g_est.encoder
+                                : estimate_choose_encoder(&g_info, &g_hw_info));
     quality = g_enc_opt.crf_override > 0
         ? g_enc_opt.crf_override
         : presets_quality_value(encoder, g_quality_selected,
@@ -3840,6 +3948,8 @@ static void encode_ui_start_custom_test(HWND hWnd)
     job->video_codec = g_enc_opt.video_codec;
     job->video_track = encode_selected_video_track(&g_info, &g_enc_opt);
     job->quality = quality;
+    job->preset_level = (g_enc_opt.crf_override <= 0);
+    job->quality_level = g_quality_selected;
     job->src = g_info;
     job->clips = 4;
     job->clip_seconds = 4.0;
@@ -3858,6 +3968,8 @@ static void encode_ui_restart_custom_test(HWND hWnd)
                 g_enc_opt.video_codec == ENC_VCODEC_H264 ||
                 encode_selected_video_track(&g_info, &g_enc_opt) != g_info.video_primary);
     if (!need) {
+        if (g_custom_est_testing) g_custom_est_cancel = 1;
+        g_custom_est_gen++;
         g_custom_est_ready = 0;
         g_custom_est_testing = 0;
         if (hWnd) {
@@ -3880,7 +3992,14 @@ static void encode_ui_on_custom_est_done(HWND hWnd, CustomEstDoneMsg *msg){
     if (msg->result == ESTIMATE_OK) {
         g_custom_est = msg->est;
         g_custom_est_ready = 1;
-        set_status_id(STR_COMP_ADV_TEST_READY, 0);
+        if (msg->used_fallback) {
+            g_enc_opt.encoder_override = msg->encoder;
+            g_quality_encoder = msg->encoder;
+            g_quality_last_seconds = 0.0;
+            set_status_text(text(STR_QUALITY_FALLBACK), 0);
+        } else {
+            set_status_id(STR_COMP_ADV_TEST_READY, 0);
+        }
     } else if (msg->result == ESTIMATE_CANCELLED) {
         g_custom_est_ready = 0;
     } else {
@@ -4385,6 +4504,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             update_fixed_metrics();
             gb_set_dpi(g_dpi);
             create_fonts();
+            if (g_hEditCrf) {
+                SendMessageW(g_hEditCrf, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            }
+            if (g_hEditCustom) {
+                SendMessageW(g_hEditCustom, WM_SETFONT, (WPARAM)g_fontBold, TRUE);
+            }
             if (suggested) {
                 SetWindowPos(hWnd, NULL, suggested->left, suggested->top,
                              g_total_w, g_total_h, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -4423,7 +4548,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case WM_SETCURSOR: {
-            if ((HWND)wParam == hWnd && !g_has_info && !g_probing) {
+            if ((HWND)wParam == hWnd && !g_has_info && !g_probing &&
+                !g_hw_testing) {
                 POINT pt;
                 GetCursorPos(&pt);
                 ScreenToClient(hWnd, &pt);
@@ -4439,11 +4565,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             POINT pt;
             pt.x = GET_X_LPARAM(lParam);
             pt.y = GET_Y_LPARAM(lParam);
+            if (g_advanced_active || g_input_active || g_hw_testing) break;
             if (g_step == 1 && !g_quality_testing) {
                 quality_select_at(hWnd, pt.x, pt.y);
                 return 0;
             }
-            if (!g_has_info && !g_probing) {
+            if (!g_has_info && !g_probing && !g_hw_testing) {
                 if (PtInRect(&g_rc_drop, pt)) {
                     choose_file(hWnd);
                     return 0;
@@ -4778,6 +4905,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == VK_ESCAPE) {
                 if (g_input_active) {
                     encode_ui_close_custom();
+                } else if (g_advanced_active) {
+                    encode_ui_close_advanced();
                 } else if (g_step == 2) {
                     if (g_encode_state == 1) encode_ui_cancel();
                     else encode_ui_back(hWnd);
@@ -4911,12 +5040,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             if (g_hw_testing) g_hw_cancel = 1;
             if (g_quality_testing) g_est_cancel = 1;
+            if (g_custom_est_testing) g_custom_est_cancel = 1;
             DestroyWindow(hWnd);
             return 0;
 
         case WM_DESTROY:
             if (g_hw_testing) g_hw_cancel = 1;
             if (g_quality_testing) g_est_cancel = 1;
+            if (g_custom_est_testing) g_custom_est_cancel = 1;
             if (g_encode_state == 1) g_encode_cancel = 1;
             quality_cleanup_previews();
             if (g_brushLightest) {
@@ -4940,6 +5071,7 @@ int ui_run(HINSTANCE hInstance, int nCmdShow, const wchar_t *initial_path)
     RECT rc;
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    estimate_cleanup_stale_temp();
 
     g_dpi = query_window_dpi(NULL);
     update_fixed_metrics();

@@ -47,7 +47,7 @@ level. It prints estimated vs actual size/time and the median SSIM:
 ```cmd
 gcc -std=c11 -O2 -municode -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 ^
     -Isrc tests\estimate_check.c src\probe.c src\hw.c src\presets.c ^
-    src\estimate.c src\util.c src\strings.c src\cjson.c ^
+    src\estimate.c src\encode.c src\util.c src\strings.c src\cjson.c ^
     -o tests\build\estimate_check.exe ^
     -lole32 -luuid -ldxguid -lshell32 -ladvapi32 -lgdi32 -luser32
 

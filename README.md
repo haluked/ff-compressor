@@ -8,9 +8,10 @@ A small, native Windows video compressor built in C with a Game Boy-inspired
 interface. It uses a portable FFmpeg build for analysis and encoding; the
 application itself has no Python, .NET, Electron or Qt runtime.
 
-**Status:** M6 / v1.0.0. Analysis, hardware testing, quality estimates,
-SSIM/preview and full compression are implemented and packaged. Phone-specific
-clips remain pending until real phone footage is available.
+**Status:** M7 / v1.1.0. Analysis, hardware testing, quality estimates,
+SSIM/preview, track selection, advanced encoder/quality overrides and full
+compression are implemented and packaged. Phone-specific clips remain pending
+until real phone footage is available.
 
 ## Tutorial
 
@@ -167,16 +168,20 @@ files.
   video changes, the estimate is reset, or the window closes.
 - NVENC/QSV are tested at runtime on the user's machine. On the AMD-only
   development PC they are marked `untested_on_hardware`; a failing GPU encoder
-  falls back to CPU x265 with a clear status message.
+  falls back to CPU x265 for both the estimate and the real encode, with a
+  clear status message. 10-bit SDR and HDR sources only offer encoders that
+  passed the 10-bit test.
 - Compression step: MKV is the default container; MP4 is selectable. H.265 is
   the default video codec and uses the tested hardware encoder with CPU x265
   fallback. H.264 is always CPU x264 for maximum compatibility. HDR sources
   encoded as H.264 are tone-mapped to SDR and tagged BT.709.
 - The `ADVANCED` panel overrides the encoder and quality: Auto, CPU x265,
   NVIDIA NVENC, Intel QSV or AMD AMF, plus preset, `ARCHIVE` (CPU x265 CRF 19)
-  or a custom CRF/quality value. Applying a changed setting runs a short sample
-  test for that exact encoder/quality and updates the size/time estimate before
-  compression starts. Hardware quality numbers are not CRF; the panel says so.
+  or a custom CRF/quality value. Choosing ARCHIVE also switches the video codec
+  to H.265 so the label and the command agree. Applying a changed setting runs a
+  short sample test for that exact encoder/quality and updates the size/time
+  estimate before compression starts. Hardware quality numbers are not CRF; the
+  panel says so.
 - The quality screen has a `DETAILS` view that lists the actual CRF/QSV/NVENC/AMF
   value behind every preset, and a `DEEP ANALYZE` action that samples 4 x 6s
   clips instead of the normal 3 x 4s for long or grainy films.
@@ -189,22 +194,26 @@ files.
   Copy, Opus (default), AAC, MP3, FLAC, AC-3, E-AC-3, Vorbis. MP4 hides Opus,
   FLAC and Vorbis. Bitrates are Voice 24k / Music 36k / High 64k / Custom, with
   no bitrate for Copy or FLAC. A custom value can be typed directly (16–512
-  kbps; 64 kbps minimum for AC-3/E-AC-3). The Opus compatibility note stays
-  visible for MKV.
+  kbps; 64 kbps minimum for AC-3/E-AC-3 and 32 kbps for Vorbis). The Opus
+  compatibility note stays visible for MKV.
 - Audio tracks are selectable on the compress screen. `ALL n TRACKS` keeps
   every track, `NO AUDIO` drops all of them, and the track menu lists each
   stream with its language/title, codec, channel layout and bitrate, so e.g.
   only the original Polish 5.1 track can be kept. Selection drives explicit maps
-  and per-stream encoder options. If a track's source bitrate is already below
-  the selected target, that track is copied instead of re-encoded. Multichannel
-  tracks that are being re-encoded are proposed for stereo downmix (on by
-  default; MP3/AC-3/E-AC-3 always use stereo). Copy and FLAC keep their channels.
+  and per-stream encoder options. A track is copied only when its source codec
+  already matches the requested codec and no stereo downmix was requested; a
+  24 kbps AAC track selected as Opus is re-encoded to Opus, not passed through.
+  Multichannel tracks that are being re-encoded are proposed for stereo downmix
+  (on by default; MP3/AC-3/E-AC-3 always use stereo). Copy and FLAC keep their
+  channels.
 - Subtitle tracks are selectable too: `ALL n SUBTITLES`, `NO SUBTITLES` or a
-  single track. MKV copies the selected tracks as-is; MP4 converts selected text
-  tracks to `mov_text` and drops selected bitmap tracks (with confirmation).
+  single track. MKV copies supported text/bitmap codecs and converts unsupported
+  text such as `mov_text` to SRT; MP4 converts selected text tracks to
+  `mov_text` and drops selected bitmap tracks (with confirmation).
 - Opus/Vorbis receive an encoder-safe channel layout and 48 kHz output. This
   fixes `libopus` aborting with `Invalid channel layout 5.1(side)` or
-  `7.1(wide)` when surround is kept instead of downmixed.
+  `7.1(wide)` when surround is kept instead of downmixed, and the 96 kHz Vorbis
+  encoder setup failure.
 - If the source has several moving-picture streams, a `VIDEO n/m` menu appears
   and the chosen stream is mapped by its absolute ffprobe index. Cover art
   (`attached_pic`) is never selected as the primary video.
@@ -213,8 +222,9 @@ files.
   original file is never written to or overwritten. FFmpeg writes a `.partial`
   file first; it is renamed only after a successful encode.
 - After encoding, `ffprobe` verifies the output: video and duration exist, the
-  display resolution and the planned audio/subtitle track counts match. A failed
-  verification deletes the partial output and reports an error.
+  display resolution and the planned audio/subtitle track counts match, the
+  requested audio codecs were produced, and no `mov_text` stream ended up in
+  MKV. A failed verification deletes the partial output and reports an error.
 - The progress view shows percentage, elapsed time, speed and the quality-step
   time estimate. `CANCEL` stops FFmpeg and deletes the partial file.
 - Explicit stream maps are used (selected video by absolute index, selected
@@ -304,10 +314,10 @@ result. The M5 matrix covered:
 
 - MKV and MP4 output, with H.265 and H.264.
 - Audio Copy, Opus, AAC, MP3, FLAC, AC-3, E-AC-3 and Vorbis, including the
-  MP4 container filter.
-- The "source below target → copy" rule (24k source vs 36k target), multiple
-  audio tracks, and a 5.1 source with stereo downmix.
-- Text subtitle copy in MKV and conversion to `mov_text` in MP4.
+  MP4 container filter and the same-codec copy rule.
+- Multiple audio tracks and a 5.1 source with stereo downmix.
+- Text subtitle copy in MKV, `mov_text` conversion for MP4, and `mov_text` to
+  SRT conversion when an MP4 source is written to MKV.
 - HDR10 to H.265 (10-bit/HDR preserved) and HDR10 to H.264 (BT.709 tone-map).
 - VFR, anamorphic, rotated, 1080p and 4K sources.
 - Repeated encodes (numeric suffix, no overwrite) and cancellation (partial
@@ -315,14 +325,14 @@ result. The M5 matrix covered:
 
 Real 4K HDR10 HEVC was re-encoded to a 10-bit HEVC output with BT.2020/PQ tags
 intact; real 1080p HDR10 was also written to MP4 with `hvc1`. The current app
-build is **353 KB**, and the core suite passes **493 tests**.
+build is **468.5 KB**, and the core suite passes **612 tests**.
 
-## M6 release validation
+## M7 release validation
 
-- Version metadata is **1.0.0** in the executable, manifest and window.
-- `tools\make-release.ps1` builds `dist\ff-compressor-1.0.0-win64\` from a
-  clean commit, including the app, pinned FFmpeg, licences, notices, checksums
-  and `source.zip`.
+- Version metadata is **1.1.0** in the executable, manifest and window.
+- `tools\make-release.ps1` builds `dist\ff-compressor-1.1.0-win64\` from a
+  clean commit, including the app, pinned FFmpeg, licences, notices, checksums,
+  `source.zip` and the `docs\` folder used by this README.
 - All release checksums verify against `SHA256SUMS.txt`.
 - The packaged EXE was run from the release folder and completed full
   compressions using its own `bin\ffmpeg.exe` and `bin\ffprobe.exe`:

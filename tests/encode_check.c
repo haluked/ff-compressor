@@ -177,12 +177,23 @@ int wmain(int argc, wchar_t **argv)
         if (result == ENCODE_OK) {
             memset(&outinfo, 0, sizeof(outinfo));
             if (probe_run(out_path, &outinfo) == PROBE_OK) {
+                int ai, si;
                 wprintf(L"OUTPUT duration=%.3f video=%ls %dx%d audio=%d subs=%d "
                         L"size=%lld\n",
                         outinfo.duration, outinfo.video_codec,
                         outinfo.coded_width, outinfo.coded_height,
                         outinfo.audio_track_count, outinfo.subtitle_track_count,
                         outinfo.file_size);
+                for (ai = 0; ai < outinfo.audio_tracks_stored; ai++) {
+                    wprintf(L"AUDIO[%d] codec=%ls channels=%d bitrate=%lld\n",
+                            ai, outinfo.audio_tracks[ai].codec,
+                            outinfo.audio_tracks[ai].channels,
+                            outinfo.audio_tracks[ai].bitrate);
+                }
+                for (si = 0; si < outinfo.subtitle_tracks_stored; si++) {
+                    wprintf(L"SUB[%d] codec=%ls\n", si,
+                            outinfo.subtitle_tracks[si].codec);
+                }
             } else {
                 wprintf(L"OUTPUT_PROBE_FAIL\n");
             }

@@ -86,5 +86,6 @@ EstimateResult estimate_run_custom(const SourceInfo *src, const HwInfo *hw,
                                    volatile int *cancel);
 
 void estimate_cleanup_preview_dir(EstimateSet *set);
+void estimate_cleanup_stale_temp(void);
 
 #endif /* ESTIMATE_H */
